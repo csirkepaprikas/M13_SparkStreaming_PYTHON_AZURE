@@ -382,6 +382,12 @@ Then I uploaded the source data to the new data container:
 
 ![uploaded_data](https://github.com/user-attachments/assets/da1a78cc-5c85-4f2d-8867-0ebe0dd8afc7)
 
+Here you can see the GUI of the Databricks:
+
+![databricks_gui](https://github.com/user-attachments/assets/2de7f45c-9294-4daf-ad7b-7be40cf2a8b0)
+
+
+
 
 
 
