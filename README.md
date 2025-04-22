@@ -372,6 +372,15 @@ Outputs:
 
 resource_group_name = "r"
 ```
+Here are the created resources in the Azure GUI:
+
+![dbricks_resources](https://github.com/user-attachments/assets/f5e071b2-ab4d-4ad5-93c2-7802ca2c8a1b)
+
+Then I uploaded the source data to the new data container:
+
+![uploading_source](https://github.com/user-attachments/assets/458aac34-2bfe-4a3a-9509-4c7d25b35792)
+
+![uploaded_data](https://github.com/user-attachments/assets/da1a78cc-5c85-4f2d-8867-0ebe0dd8afc7)
 
 
 
