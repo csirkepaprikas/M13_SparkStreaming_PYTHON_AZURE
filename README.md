@@ -15,11 +15,16 @@ First I created a new Resource Group in the Azure GUI:
 
 ![new_rg](https://github.com/user-attachments/assets/7601ded3-94a8-4a13-b0fd-212e55474b67)
 
-Then I created the storage container:
+Then I created the storage account:
 
 ![new_cont](https://github.com/user-attachments/assets/64a286a5-1659-47bd-a103-779abf8c9fe7)
 
 ![created_stor_cont](https://github.com/user-attachments/assets/c9896417-7d48-4374-b81f-8cbfb338bdfd)
+
+Also created the container for the terraform:
+
+![container](https://github.com/user-attachments/assets/a95c3fcb-f4a5-499d-9456-c8006a4e43e7)
+
 
 Then I modified the main.tf to being able to create the infrastructure on top of Azure.
 
