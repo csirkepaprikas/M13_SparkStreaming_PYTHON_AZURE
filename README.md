@@ -386,8 +386,29 @@ Here you can see the GUI of the Databricks:
 
 ![databricks_gui](https://github.com/user-attachments/assets/2de7f45c-9294-4daf-ad7b-7be40cf2a8b0)
 
+Then to being able to use secrets in the Databricks GUI, first I created an access token:
 
+![accesstoken](https://github.com/user-attachments/assets/2998d547-85f8-412b-93c2-1ec720d3558e)
 
+Then configured the Databricks CLi with the token:
+
+```python
+c:\data_eng\házi\6\m13_sparkstreaming_python_azure-master\terraform>databricks configure --token
+Databricks Host (should begin with https://): https://adb6.azuredatabricks.net
+Token:
+
+```
+
+After I created the actual secret-scope in the CLI:
+
+```python
+databricks secrets create-scope --scope streaming --initial-manage-principal users
+
+c:\data_eng\házi\6\m13_sparkstreaming_python_azure-master\terraform>databricks secrets list-scopes
+Scope      Backend     KeyVault URL
+---------  ----------  --------------
+streaming  DATABRICKS  N/A
+```
 
 
 
