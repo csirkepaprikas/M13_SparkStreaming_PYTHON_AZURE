@@ -399,7 +399,7 @@ Token:
 
 ```
 
-After I created the actual secret-scope in the CLI:
+After that I created the actual secret-scope in the CLI:
 
 ```python
 databricks secrets create-scope --scope streaming --initial-manage-principal users
