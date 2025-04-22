@@ -17,9 +17,12 @@ First I created a new Resource Group in the Azure GUI:
 
 Then I created the storage container:
 
-![Uploading new_cont.png…]()
+![new_cont](https://github.com/user-attachments/assets/64a286a5-1659-47bd-a103-779abf8c9fe7)
 
-![Uploading created_stor_cont.png…]()
+![created_stor_cont](https://github.com/user-attachments/assets/c9896417-7d48-4374-b81f-8cbfb338bdfd)
+
+Then I modified the main.tf to being able to create the infrastructure on top of Azure.
+
 
 
 
