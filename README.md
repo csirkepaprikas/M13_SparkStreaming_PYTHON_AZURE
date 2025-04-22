@@ -11,6 +11,15 @@ By the end of the homework, I have acquired knowledge of execution, monitoring, 
 
 ## Preparations
 
+First I created a new Resource Group in the Azure GUI:
+
+![new_rg](https://github.com/user-attachments/assets/7601ded3-94a8-4a13-b0fd-212e55474b67)
+
+Then I created the storage container:
+
+![Uploading new_cont.png…]()
+
+![Uploading created_stor_cont.png…]()
 
 
 
