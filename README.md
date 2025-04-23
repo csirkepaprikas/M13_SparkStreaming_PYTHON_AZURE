@@ -515,6 +515,53 @@ And the uploaded data:
 ![batched_data_dire](https://github.com/user-attachments/assets/ac0efe0b-4663-4d67-8f14-7955295659d9)
 
 
+With this simple code I checked the data and type of the columns:
+
+```python
+import pandas as pd
+import glob
+
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', None)
+files=  glob.glob("c:/data_eng/házi/6/m13sparkstreaming/hotel-weather/year=2017/month=09/day=30/part-00023-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet")
+
+df = pd.read_parquet(files[0])
+print(df.head())
+```
+
+The output:
+
+```python
+                address  avg_tmpr_c  avg_tmpr_f       city country geoHash             id  latitude  longitude                   name   wthr_date
+0  Super 8 Manhattan Ks        21.0        69.8  Manhattan      US    9ygq  1322849927170  39.18027  -96.55681  200 Tuttle Creek Blvd  2017-09-30
+```
+
+Also checked the actual type of the columns:
+
+```python
+import pandas as pd
+
+df= pd.read_parquet("c:/data_eng/házi/6/m13sparkstreaming/hotel-weather/year=2017/month=09/day=30/part-00023-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet")
+
+print(df.dtypes)
+```
+
+The output was:
+
+```python
+address        object
+avg_tmpr_c    float64
+avg_tmpr_f    float64
+city           object
+country        object
+geoHash        object
+id             object
+latitude      float64
+longitude     float64
+name           object
+wthr_date      object
+dtype: object
+```
 
 
 
