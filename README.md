@@ -376,12 +376,6 @@ Here are the created resources in the Azure GUI:
 
 ![dbricks_resources](https://github.com/user-attachments/assets/f5e071b2-ab4d-4ad5-93c2-7802ca2c8a1b)
 
-Then I uploaded the source data to the new data container:
-
-![uploading_source](https://github.com/user-attachments/assets/458aac34-2bfe-4a3a-9509-4c7d25b35792)
-
-![uploaded_data](https://github.com/user-attachments/assets/da1a78cc-5c85-4f2d-8867-0ebe0dd8afc7)
-
 Here you can see the GUI of the Databricks:
 
 ![databricks_gui](https://github.com/user-attachments/assets/2de7f45c-9294-4daf-ad7b-7be40cf2a8b0)
@@ -409,6 +403,119 @@ Scope      Backend     KeyVault URL
 ---------  ----------  --------------
 streaming  DATABRICKS  N/A
 ```
+
+## Tasks completion
+
+First I wrote the "streaming-simulation" upload locally. The method was to upload all the parquets to the destination container of a particular day, then having a small delay and upload the next batch.
+I declared the sensitive paramaters in a .env file and loaded them in the actual python file.
+
+```python
+import os
+import time
+from azure.storage.blob import BlobServiceClient
+from dotenv import load_dotenv
+load_dotenv()
+
+connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+
+# Name of the container in your Azure Blob Storage
+container_name = os.getenv("CONTAINER_NAME")
+
+# Local root folder containing your weather data (with subfolders like year=..., month=..., day=...)
+local_root_folder = "c:/data_eng/házi/6/m13sparkstreaming/hotel-weather/"
+
+# Delay between days (in seconds)
+delay_seconds = 3
+
+# Create a BlobServiceClient using the connection string
+blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+
+# Get a reference to the container
+container_client = blob_service_client.get_container_client(container_name)
+
+#MAIN LOGIC: Upload day-by-day with delay in between
+
+# Walk through folders
+for year in sorted(os.listdir(local_root_folder)):
+    year_path = os.path.join(local_root_folder, year)
+    if not os.path.isdir(year_path):
+        continue  # Skip if not a directory
+
+    for month in sorted(os.listdir(year_path)):
+        month_path = os.path.join(year_path, month)
+        if not os.path.isdir(month_path):
+            continue
+
+        for day in sorted(os.listdir(month_path)):
+            day_path = os.path.join(month_path, day)
+            if not os.path.isdir(day_path):
+                continue
+
+            print(f"Uploading data for: {day_path}")
+
+            # Upload all .parquet files for the current day (no delay between files)
+            for filename in os.listdir(day_path):
+                if filename.endswith(".parquet"):
+                    local_file_path = os.path.join(day_path, filename)
+
+                    # Build the relative blob path (preserving folder structure inside 'hotel-weather/')
+                    relative_path = os.path.relpath(local_file_path, local_root_folder)
+                    blob_path = f"hotel-weather/{relative_path.replace(os.sep, '/')}"
+
+                    print(f"Uploading: {blob_path}")
+
+                    # Open the file and upload it to Azure Blob Storage
+                    with open(local_file_path, "rb") as file:
+                        container_client.upload_blob(name=blob_path, data=file, overwrite=True)
+
+            print(f"Finished uploading files for {day_path}.\n")
+
+            # Wait before moving to the next day
+            time.sleep(delay_seconds)
+
+print("All weather data successfully uploaded day by day!")
+```
+
+I tested it, here you can see the fraction of output of the code:
+
+```python
+Uploading data for: c:/data_eng/házi/6/m13sparkstreaming/hotel-weather/year=2017\month=09\day=29
+Uploading: hotel-weather/year=2017/month=09/day=29/part-00023-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=29/part-00026-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=29/part-00099-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=29/part-00123-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=29/part-00144-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=29/part-00148-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=29/part-00151-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=29/part-00156-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=29/part-00176-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=29/part-00184-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Finished uploading files for c:/data_eng/házi/6/m13sparkstreaming/hotel-weather/year=2017\month=09\day=29.
+
+Uploading data for: c:/data_eng/házi/6/m13sparkstreaming/hotel-weather/year=2017\month=09\day=30
+Uploading: hotel-weather/year=2017/month=09/day=30/part-00023-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=30/part-00026-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=30/part-00099-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=30/part-00123-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=30/part-00144-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=30/part-00148-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=30/part-00151-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=30/part-00156-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=30/part-00176-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=30/part-00184-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Finished uploading files for c:/data_eng/házi/6/m13sparkstreaming/hotel-weather/year=2017\month=09\day=30.
+
+All weather data successfully uploaded day by day!
+
+Process finished with exit code 0
+```
+
+And the uploaded data:
+
+![batched_data_dire](https://github.com/user-attachments/assets/ac0efe0b-4663-4d67-8f14-7955295659d9)
+
+
+
 
 
 
