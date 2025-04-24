@@ -563,6 +563,29 @@ wthr_date      object
 dtype: object
 ```
 
+Then I created the secrets to the secret-scope via CMD:
+
+```python
+c:\data_eng\házi\6\m13_sparkstreaming_python_azure-master\terraform>databricks secrets list-scopes
+Scope      Backend     KeyVault URL
+---------  ----------  --------------
+streaming  DATABRICKS  N/A
+
+c:\data_eng\házi\6\m13_sparkstreaming_python_azure-master\terraform>databricks secrets put --scope streaming --key AZURE_STORAGE_ACCOUNT_NAME
+
+c:\data_eng\házi\6\m13_sparkstreaming_python_azure-master\terraform>databricks secrets put --scope streaming --key AZURE_STORAGE_ACCOUNT_KEY
+
+c:\data_eng\házi\6\m13_sparkstreaming_python_azure-master\terraform>databricks secrets put --scope streaming --key AZURE_CONTAINER_NAME
+
+c:\data_eng\házi\6\m13_sparkstreaming_python_azure-master\terraform>databricks secrets list --scope streaming
+Key name                      Last updated
+--------------------------  --------------
+AZURE_CONTAINER_NAME         1745478036643
+AZURE_STORAGE_ACCOUNT_KEY    1745477993780
+AZURE_STORAGE_ACCOUNT_NAME   1745477909713
+
+c:\data_eng\házi\6\m13_sparkstreaming_python_azure-master\terraform>
+```
 
 
 
