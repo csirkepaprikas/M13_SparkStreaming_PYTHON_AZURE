@@ -948,4 +948,11 @@ AdaptiveSparkPlan isFinalPlan=false
             +- Project [avg_tmpr_c#285548, city#285550, id#285553, cast(wthr_date#285557 as timestamp) AS wthr_date#285569]
                +- FileScan parquet [avg_tmpr_c#285548,city#285550,id#285553,wthr_date#285557] Batched: true, DataFilters: [], Format: Parquet, Location: InMemoryFileIndex(1 paths)[wasbs://[REDACTED]@[REDACTED].blob.core.windows.net/hotel-weather], PartitionFilters: [], PushedFilters: [], ReadSchema: struct<avg_tmpr_c:double,city:string,id:string,wthr_date:string>
 ```
+Aggregation (Aggregate):
+This step groups the data by certain columns and calculates aggregated values (e.g., count, average, max, min). It can be an expensive operation, as Spark needs to shuffle a lot of data across the cluster to perform these calculations, especially with large datasets.
 
+Shuffling (Exchange):
+The data needs to be redistributed across nodes so that related records are processed together. This is an expensive operation because it takes a lot of time and resources, especially when working with large groups of data.
+
+FileScan:
+Reading Parquet files can be time-consuming, especially when dealing with large amounts of data or distributed storage. The efficiency of file reading depends on how the data is partitioned and stored.
