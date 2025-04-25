@@ -872,3 +872,80 @@ Paris Max temp in the city: 10.7 °C
 
 Process finished with exit code 0
 ```
+
+### Execution plan:
+
+After the writeStream starting I won't be able to call the aggregated.explain(), because the aggregated would work as a process by this time, so I made a batch-only version from the aggregated DataFrame (with the same operation logic), but instead of readStream I got the data from the read. Also I used just a small collection of data for this task.
+
+The actual cell:
+
+```python
+df_batch = (spark.read
+            .schema(schema)
+            .parquet(f"wasbs://{container}@{storage_account}.blob.core.windows.net/hotel-weather/"))
+
+df_batch = df_batch.withColumn("wthr_date", col("wthr_date").cast(TimestampType()))
+
+df_batch = df_batch.withColumn("year", year("wthr_date")) \
+                   .withColumn("month", month("wthr_date")) \
+                   .withColumn("day", dayofmonth("wthr_date"))
+
+aggregated_batch = (
+    df_batch.groupBy("city", "year", "month", "day")
+    .agg(
+        approx_count_distinct("id").alias("distinct_hotels"),
+        avg("avg_tmpr_c").alias("avg_temp"),
+        max("avg_tmpr_c").alias("max_temp"),
+        min("avg_tmpr_c").alias("min_temp")
+    )
+)
+
+# By run the explain to  I get the execution plan
+aggregated_batch.explain(True)
+
+```
+
+The actual execution plan with comments:
+
+```python
+== Parsed Logical Plan == 
+-- Aggregation operation on city, year, month, and day to calculate distinct hotels, average temperature, max temperature, and min temperature
+-- This step is computationally expensive because it involves grouping the data by multiple columns and performing aggregation functions on potentially large datasets.
+'Aggregate ['city, 'year, 'month, 'day], ['city, 'year, 'month, 'day, 'approx_count_distinct('id) AS distinct_hotels#285638, 'avg('avg_tmpr_c) AS avg_temp#285639, 'max('avg_tmpr_c) AS max_temp#285640, 'min('avg_tmpr_c) AS min_temp#285641]
++- Project [address#285547, avg_tmpr_c#285548, avg_tmpr_f#285549, city#285550, country#285551, geoHash#285552, id#285553, latitude#285554, longitude#285555, name#285556, wthr_date#285569, year#285582, month#285595, dayofmonth(cast(wthr_date#285569 as date)) AS day#285609]
+   +- Project [address#285547, avg_tmpr_c#285548, avg_tmpr_f#285549, city#285550, country#285551, geoHash#285552, id#285553, latitude#285554, longitude#285555, name#285556, wthr_date#285569, year#285582, month(cast(wthr_date#285569 as date)) AS month#285595]
+      +- Project [address#285547, avg_tmpr_c#285548, avg_tmpr_f#285549, city#285550, country#285551, geoHash#285552, id#285553, latitude#285554, longitude#285555, name#285556, wthr_date#285569, year(cast(wthr_date#285569 as date)) AS year#285582]
+         +- Project [address#285547, avg_tmpr_c#285548, avg_tmpr_f#285549, city#285550, country#285551, geoHash#285552, id#285553, latitude#285554, longitude#285555, name#285556, cast(wthr_date#285557 as timestamp) AS wthr_date#285569]
+            +- Relation [address#285547, avg_tmpr_c#285548, avg_tmpr_f#285549, city#285550, country#285551, geoHash#285552, id#285553, latitude#285554, longitude#285555, name#285556, wthr_date#285557] parquet
+
+== Analyzed Logical Plan == 
+-- Data types of each column after analysis: city (string), year (int), month (int), day (int), distinct_hotels (bigint), avg_temp (double), max_temp (double), min_temp (double)
+-- Analysis step ensures data types are correct, but does not involve heavy computation.
+Aggregate [city#285550, year#285582, month#285595, day#285609], [city#285550, year#285582, month#285595, day#285609, approx_count_distinct(id#285553, 0.05, 0, 0) AS distinct_hotels#285638L, avg(avg_tmpr_c#285548) AS avg_temp#285639, max(avg_tmpr_c#285548) AS max_temp#285640, min(avg_tmpr_c#285548) AS min_temp#285641]
++- Project [address#285547, avg_tmpr_c#285548, avg_tmpr_f#285549, city#285550, country#285551, geoHash#285552, id#285553, latitude#285554, longitude#285555, name#285556, wthr_date#285569, year#285582, month#285595, dayofmonth(cast(wthr_date#285569 as date)) AS day#285609]
+   +- Project [address#285547, avg_tmpr_c#285548, avg_tmpr_f#285549, city#285550, country#285551, geoHash#285552, id#285553, latitude#285554, longitude#285555, name#285556, wthr_date#285569, year#285582, month(cast(wthr_date#285569 as date)) AS month#285595]
+      +- Project [address#285547, avg_tmpr_c#285548, avg_tmpr_f#285549, city#285550, country#285551, geoHash#285552, id#285553, latitude#285554, longitude#285555, name#285556, wthr_date#285569, year(cast(wthr_date#285569 as date)) AS year#285582]
+         +- Project [address#285547, avg_tmpr_c#285548, avg_tmpr_f#285549, city#285550, country#285551, geoHash#285552, id#285553, latitude#285554, longitude#285555, name#285556, cast(wthr_date#285557 as timestamp) AS wthr_date#285569]
+            +- Relation [address#285547, avg_tmpr_c#285548, avg_tmpr_f#285549, city#285550, country#285551, geoHash#285552, id#285553, latitude#285554, longitude#285555, name#285556, wthr_date#285557] parquet
+
+== Optimized Logical Plan == 
+-- The plan after optimization, focusing on better performance for aggregate operations
+-- Optimizing the grouping and aggregate steps to minimize unnecessary data shuffling and improve query efficiency.
+Aggregate [city#285550, year#285582, month#285595, day#285609], [city#285550, year#285582, month#285595, day#285609, approx_count_distinct(id#285553, 0.05) AS distinct_hotels#285638L, avg(avg_tmpr_c#285548) AS avg_temp#285639, max(avg_tmpr_c#285548) AS max_temp#285640, min(avg_tmpr_c#285548) AS min_temp#285641]
++- Project [avg_tmpr_c#285548, city#285550, id#285553, year(cast(wthr_date#285569 as date)) AS year#285582, month(cast(wthr_date#285569 as date)) AS month#285595, dayofmonth(cast(wthr_date#285569 as date)) AS day#285609]
+   +- Project [avg_tmpr_c#285548, city#285550, id#285553, cast(wthr_date#285557 as timestamp) AS wthr_date#285569]
+      +- Relation [address#285547, avg_tmpr_c#285548, avg_tmpr_f#285549, city#285550, country#285551, geoHash#285552, id#285553, latitude#285554, longitude#285555, name#285556, wthr_date#285557] parquet
+
+== Physical Plan == 
+-- Initial stage of the physical plan, considering parallel execution and partitioning
+-- The physical plan is where Spark decides how to execute the plan, including how to partition data across multiple nodes and handle shuffling.
+AdaptiveSparkPlan isFinalPlan=false
++- == Initial Plan == 
+   HashAggregate(keys=[city#285550, year#285582, month#285595, day#285609], functions=[finalmerge_approx_count_distinct(merge buffer#285872) AS approx_count_distinct(id#285553, 0.05)#285746L, finalmerge_avg(merge sum#285864, count#285865L) AS avg(avg_tmpr_c#285548)#285747, finalmerge_max(merge max#285867) AS max(avg_tmpr_c#285548)#285748, finalmerge_min(merge min#285869) AS min(avg_tmpr_c#285548)#285749], output=[city#285550, year#285582, month#285595, day#285609, distinct_hotels#285638L, avg_temp#285639, max_temp#285640, min_temp#285641])
+   +- Exchange hashpartitioning(city#285550, year#285582, month#285595, day#285609, 200), ENSURE_REQUIREMENTS, [plan_id=108021]
+      +- HashAggregate(keys=[city#285550, year#285582, month#285595, day#285609], functions=[partial_approx_count_distinct(id#285553, 0.05) AS buffer#285872, partial_avg(avg_tmpr_c#285548) AS (sum#285864, count#285865L), partial_max(avg_tmpr_c#285548) AS max#285867, partial_min(avg_tmpr_c#285548) AS min#285869], output=[city#285550, year#285582, month#285595, day#285609, buffer#285872, sum#285864, count#285865L, max#285867, min#285869])
+         +- Project [avg_tmpr_c#285548, city#285550, id#285553, year(cast(wthr_date#285569 as date)) AS year#285582, month(cast(wthr_date#285569 as date)) AS month#285595, dayofmonth(cast(wthr_date#285569 as date)) AS day#285609]
+            +- Project [avg_tmpr_c#285548, city#285550, id#285553, cast(wthr_date#285557 as timestamp) AS wthr_date#285569]
+               +- FileScan parquet [avg_tmpr_c#285548,city#285550,id#285553,wthr_date#285557] Batched: true, DataFilters: [], Format: Parquet, Location: InMemoryFileIndex(1 paths)[wasbs://[REDACTED]@[REDACTED].blob.core.windows.net/hotel-weather], PartitionFilters: [], PushedFilters: [], ReadSchema: struct<avg_tmpr_c:double,city:string,id:string,wthr_date:string>
+```
+
