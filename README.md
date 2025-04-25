@@ -789,6 +789,20 @@ Batch: 55
 only showing top 20 rows
 ```
 
+Here you can see the dashboard of the whole streaming process:
+
+![dboard_fasza](https://github.com/user-attachments/assets/aad97566-e63b-4e84-ac3a-81fedce935b0)
+
+As you can see the input and processing rate was very similar, there was no overload during the streaming.
+
+You can see the created datas in the blob storage:
+
+![1_utani_data_cont](https://github.com/user-attachments/assets/b34b6de6-3a51-4bb6-b731-61e8c4d0d6cb)
+
+![1_utani_data_cont2](https://github.com/user-attachments/assets/d6b978ec-ee94-4bf0-9fb0-b0e1c3b7cb5d)
+
+![1_utani_data_cont3](https://github.com/user-attachments/assets/8c9c894d-50f6-4bf5-9d2e-44a4dacea115)
+
 Another strange phenomenon is that the avg,max and min temparetures are the same in most of the cases, because the low number of patterns - as you can see there many cases where there are only 1 hotel in the particular city - and there might be, that the logged datas are just the same as it happened by Paris. I tested the data prior this task execution and even though you can see, that it appears 233 times for the day 2016-10-31, all the temperature datas are the same:
 
 Here you can see the appearance for the particular day:
@@ -831,7 +845,6 @@ max_temp = city_df["avg_tmpr_c"].max()
 print(f"{city_name} Max temp in the city: {max_temp} °C")
 ```
 ```python
-C:\data_eng\házi\6\.venv\Scripts\python.exe C:\data_eng\házi\6\min_hőm.py 
 Paris Max temp in the city: 10.7 °C
 
 Process finished with exit code 0
@@ -855,7 +868,6 @@ min_temp = city_df["avg_tmpr_c"].min()
 print(f"{city_name} Min temp in the city: {min_temp} °C")
 ```
 ```python
-C:\data_eng\házi\6\.venv\Scripts\python.exe C:\data_eng\házi\6\min_hőm.py 
 Paris Max temp in the city: 10.7 °C
 
 Process finished with exit code 0
