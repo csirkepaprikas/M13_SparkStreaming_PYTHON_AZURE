@@ -586,6 +586,82 @@ AZURE_STORAGE_ACCOUNT_NAME   1745477909713
 
 c:\data_eng\házi\6\m13_sparkstreaming_python_azure-master\terraform>
 ```
+Then I inspeced the usage of the Auto Loader and wrote a script for the first task: 
+### Create Spark Structured Streaming application with Auto Loader to incrementally and efficiently processes hotel/weather data as it arrives in provisioned Storage Account. Using Spark calculate in Databricks Notebooks for each city each day
+
+```python
+from pyspark.sql.functions import year, month, dayofmonth, col, approx_count_distinct, avg, max, min
+from pyspark.sql.types import StructType, StringType, DoubleType, TimestampType
+
+# Read secrets for accessing Azure Blob Storage
+storage_account = dbutils.secrets.get(scope="streaming", key="AZURE_STORAGE_ACCOUNT_NAME")
+storage_key = dbutils.secrets.get(scope="streaming", key="AZURE_STORAGE_ACCOUNT_KEY")
+container = dbutils.secrets.get(scope="streaming", key="AZURE_CONTAINER_NAME")
+
+# Set Spark configuration to access Azure Blob Storage
+spark.conf.set(
+    f"fs.azure.account.key.{storage_account}.blob.core.windows.net",
+    storage_key
+)
+
+# Define schema for the input Parquet files
+schema = StructType() \
+    .add("address", StringType()) \
+    .add("avg_tmpr_c", DoubleType()) \
+    .add("avg_tmpr_f", DoubleType()) \
+    .add("city", StringType()) \
+    .add("country", StringType()) \
+    .add("geoHash", StringType()) \
+    .add("id", StringType()) \
+    .add("latitude", DoubleType()) \
+    .add("longitude", DoubleType()) \
+    .add("name", StringType()) \
+    .add("wthr_date", StringType())  # Will be casted to TimestampType later
+
+# Load streaming data using Auto Loader
+df = (spark.readStream
+      .format("cloudFiles")
+      .option("cloudFiles.format", "parquet")
+      .option("cloudFiles.includeExistingFiles", "false")
+      .option("cloudFiles.useIncrementalListing", "true")
+      .option("cloudFiles.maxFilesPerTrigger", 15)
+      .schema(schema)
+      .load(f"wasbs://{container}@{storage_account}.blob.core.windows.net/hotel-weather/"))
+
+# Convert wthr_date string to TimestampType (to make it easier for grouping)
+df = df.withColumn("wthr_date", col("wthr_date").cast(TimestampType()))
+
+# Add year, month, and day columns for grouping
+df_with_date_parts = df.withColumn("year", year("wthr_date")) \
+    .withColumn("month", month("wthr_date")) \
+    .withColumn("day", dayofmonth("wthr_date"))
+
+# Add watermark to handle late data
+df_with_watermark = df_with_date_parts.withWatermark("wthr_date", "1 day")  # Watermark for late data handling
+
+# Aggregate data per city per day
+aggregated = (
+    df_with_watermark
+    .groupBy("city", "year", "month", "day")  # Grouping by city and the date parts
+    .agg(
+        approx_count_distinct("id").alias("distinct_hotels"),  # Counting distinct hotels
+        avg("avg_tmpr_c").alias("avg_temp"),  # Average temperature
+        max("avg_tmpr_c").alias("max_temp"),  # Max temperature
+        min("avg_tmpr_c").alias("min_temp")   # Min temperature
+    )
+)
+
+# Write the aggregated streaming output to console with complete mode
+query = (
+    aggregated.writeStream
+    .outputMode("complete")  # Use complete mode for streaming aggregations
+    .format("console")
+    .option("truncate", False)
+    .option("checkpointLocation", f"wasbs://{container}@{storage_account}.blob.core.windows.net/checkpoints/hotel-weather-agg")  # Set checkpoint directory
+    .trigger(processingTime="20 seconds")
+    .start()
+)
+```
 
 
 
