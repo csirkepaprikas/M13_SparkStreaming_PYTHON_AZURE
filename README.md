@@ -589,6 +589,8 @@ c:\data_eng\házi\6\m13_sparkstreaming_python_azure-master\terraform>
 Then I inspeced the usage of the Auto Loader and wrote a script for the first task: 
 ### Create Spark Structured Streaming application with Auto Loader to incrementally and efficiently processes hotel/weather data as it arrives in provisioned Storage Account. Using Spark calculate in Databricks Notebooks for each city each day
 
+This code reads streaming weather data from Azure Blob Storage using Spark Structured Streaming and Auto Loader. It defines a schema for the Parquet input files, casts the weather date to timestamp, and extracts year, month, and day for grouping. It calculating the number of distinct hotels and temperature statistics (average, max, and min). Finally, it writes the aggregated results to the console every 20 seconds in complete output mode, with checkpointing enabled to track the stream’s progress. The goal was to not the overload the streaming processing unit, due to the limitations of resources of the free tier. That's teh reason ehy I used these options: ".option("cloudFiles.maxFilesPerTrigger", 15)", ".trigger(processingTime="20 seconds")". Also used another options to avoid the reproccessing of the datas: ".option("cloudFiles.includeExistingFiles", "false")", ".option("cloudFiles.useIncrementalListing", "true")".
+
 ```python
 from pyspark.sql.functions import year, month, dayofmonth, col, approx_count_distinct, avg, max, min
 from pyspark.sql.types import StructType, StringType, DoubleType, TimestampType
@@ -636,12 +638,9 @@ df_with_date_parts = df.withColumn("year", year("wthr_date")) \
     .withColumn("month", month("wthr_date")) \
     .withColumn("day", dayofmonth("wthr_date"))
 
-# Add watermark to handle late data
-df_with_watermark = df_with_date_parts.withWatermark("wthr_date", "1 day")  # Watermark for late data handling
-
 # Aggregate data per city per day
 aggregated = (
-    df_with_watermark
+    df_with_date_parts
     .groupBy("city", "year", "month", "day")  # Grouping by city and the date parts
     .agg(
         approx_count_distinct("id").alias("distinct_hotels"),  # Counting distinct hotels
@@ -662,7 +661,202 @@ query = (
     .start()
 )
 ```
+I uploaded locally with a script the daily datas to the blob store, with 15 sec delay between the daily sets to simulate the day-by-day arrival of the datas:
 
+```python
+import os
+import time
+from azure.storage.blob import BlobServiceClient
+from dotenv import load_dotenv
+load_dotenv()
 
+connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
 
+# Name of the container in your Azure Blob Storage
+container_name = os.getenv("CONTAINER_NAME")
 
+# Local root folder containing your weather data (with subfolders like year=..., month=..., day=...)
+local_root_folder = "c:/data_eng/házi/6/m13sparkstreaming/hotel-weather/"
+
+# Delay between days (in seconds)
+delay_seconds = 15
+
+# Create a BlobServiceClient using the connection string
+blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+
+# Get a reference to the container
+container_client = blob_service_client.get_container_client(container_name)
+
+# Walk through folders
+for year in sorted(os.listdir(local_root_folder)):
+    year_path = os.path.join(local_root_folder, year)
+    if not os.path.isdir(year_path):
+        continue  # Skip if not a directory
+
+    for month in sorted(os.listdir(year_path)):
+        month_path = os.path.join(year_path, month)
+        if not os.path.isdir(month_path):
+            continue
+
+        for day in sorted(os.listdir(month_path)):
+            day_path = os.path.join(month_path, day)
+            if not os.path.isdir(day_path):
+                continue
+
+            print(f"Uploading data for: {day_path}")
+
+            # Upload all .parquet files for the current day (no delay between files)
+            for filename in os.listdir(day_path):
+                if filename.endswith(".parquet"):
+                    local_file_path = os.path.join(day_path, filename)
+
+                    # Build the relative blob path (preserving folder structure inside 'hotel-weather/')
+                    relative_path = os.path.relpath(local_file_path, local_root_folder)
+                    blob_path = f"hotel-weather/{relative_path.replace(os.sep, '/')}"
+
+                    print(f"Uploading: {blob_path}")
+
+                    # Open the file and upload it to Azure Blob Storage
+                    with open(local_file_path, "rb") as file:
+                        container_client.upload_blob(name=blob_path, data=file, overwrite=True)
+
+            print(f"Finished uploading files for {day_path}.\n")
+
+            # Wait before moving to the next day
+            time.sleep(delay_seconds)
+
+print("All weather data successfully uploaded day by day!")
+```
+
+My approach was to start both the local script and the notebook's cell simultanesly and observe the aggregated results on the console.
+
+Here you can see some of the aggregated outputs. By the later there are mixed data of days due to the processing delays. The processing of the stream is carried out with micro batching, and due to the 20 sec of processing time options the data of different days were jammed.
+```python
+Batch: 0
+-------------------------------------------
++-----------------+----+-----+---+---------------+--------+--------+--------+
+|city             |year|month|day|distinct_hotels|avg_temp|max_temp|min_temp|
++-----------------+----+-----+---+---------------+--------+--------+--------+
+|Abbeville        |2016|10   |1  |1              |18.8    |18.8    |18.8    |
+|Jefferson        |2016|10   |1  |1              |14.9    |14.9    |14.9    |
+|Long Beach       |2016|10   |1  |1              |20.2    |20.2    |20.2    |
+|Springfield      |2016|10   |1  |1              |14.8    |14.8    |14.8    |
+|Guernsey         |2016|10   |1  |1              |19.4    |19.4    |19.4    |
+|Harrisonburg     |2016|10   |1  |1              |15.7    |15.7    |15.7    |
+|Palm Harbor      |2016|10   |1  |2              |26.4    |26.4    |26.4    |
+|Blackwell        |2016|10   |1  |1              |18.6    |18.6    |18.6    |
+|Englewood        |2016|10   |1  |1              |16.9    |16.9    |16.9    |
+|Fort Walton Beach|2016|10   |1  |1              |21.3    |21.3    |21.3    |
+|Mobridge         |2016|10   |1  |1              |18.9    |18.9    |18.9    |
+|Biloxi           |2016|10   |1  |1              |21.6    |21.6    |21.6    |
+|Mobile           |2016|10   |1  |2              |20.5    |20.5    |20.5    |
+|San Clemente     |2016|10   |1  |1              |19.8    |19.8    |19.8    |
+|Plainville       |2016|10   |1  |1              |11.3    |11.3    |11.3    |
+|Byron Center     |2016|10   |1  |1              |15.2    |15.2    |15.2    |
+|Philadelphia     |2016|10   |1  |2              |15.4    |15.4    |15.4    |
+|Ramey            |2016|10   |1  |1              |21.6    |21.6    |21.6    |
+|Clatskanie       |2016|10   |1  |1              |10.9    |10.9    |10.9    |
+|Enterprise       |2016|10   |1  |2              |3.8     |3.8     |3.8     |
++-----------------+----+-----+---+---------------+--------+--------+--------+
+
+-------------------------------------------
+Batch: 55
+-------------------------------------------
++----------------+----+-----+---+---------------+------------------+--------+--------+
+|city            |year|month|day|distinct_hotels|avg_temp          |max_temp|min_temp|
++----------------+----+-----+---+---------------+------------------+--------+--------+
+|Paris           |2016|10   |31 |233            |10.699999999999994|10.7    |10.7    |
+|West Yellowstone|2017|8    |12 |1              |16.4              |16.4    |16.4    |
+|Vincennes       |2016|10   |23 |1              |7.1               |7.1     |7.1     |
+|Oconomowoc      |2016|10   |21 |1              |5.6               |5.6     |5.6     |
+|Canton          |2016|10   |28 |1              |18.7              |18.7    |18.7    |
+|Auburn          |2016|10   |15 |1              |11.2              |11.2    |11.2    |
+|Galena          |2016|10   |20 |1              |8.3               |8.3     |8.3     |
+|Rangeley        |2017|8    |29 |2              |12.6              |12.6    |12.6    |
+|Perry           |2017|8    |7  |1              |23.0              |23.0    |23.0    |
+|Long Eddy       |2017|9    |6  |1              |13.9              |13.9    |13.9    |
+|Navajo Dam      |2017|8    |19 |1              |24.6              |24.6    |24.6    |
+|Burdett         |2017|8    |11 |1              |19.9              |19.9    |19.9    |
+|New Orleans     |2017|9    |2  |3              |26.899999999999995|26.9    |26.9    |
+|Forest City     |2017|8    |17 |1              |27.2              |27.2    |27.2    |
+|Roanoke         |2017|9    |6  |1              |22.0              |22.0    |22.0    |
+|Studio City     |2016|10   |9  |1              |24.0              |24.0    |24.0    |
+|Warren          |2016|10   |30 |1              |9.6               |9.6     |9.6     |
+|Navajo Dam      |2016|10   |25 |1              |13.5              |13.5    |13.5    |
+|Honolulu        |2017|8    |31 |1              |26.3              |26.3    |26.3    |
+|Batesville      |2017|8    |21 |1              |28.0              |28.0    |28.0    |
++----------------+----+-----+---+---------------+------------------+--------+--------+
+only showing top 20 rows
+```
+
+Another strange phenomenon is that the avg,max and min temparetures are the same in most of the cases, because the low number of patterns - as you can see there many cases where there are only 1 hotel in the particular city - and there might be, that the logged datas are just the same as it happened by Paris. I tested the data prior this task execution and even though you can see, that it appears 233 times for the day 2016-10-31, all the temperature datas are the same:
+
+Here you can see the appearance for the particular day:
+```python
+import pandas as pd
+
+# Parquet file reading
+df = pd.read_parquet("c:/data_eng/házi/6/m13sparkstreaming/hotel-weather/year=2016/month=10/day=31/")
+
+# Choose a city
+city_name = "Paris"
+
+# Number of appearance
+count = (df["city"] == city_name).sum()
+
+print(f"The city '{city_name}' appears {count} times in the dataset.")
+```
+```python
+C:\data_eng\házi\6\.venv\Scripts\python.exe C:\data_eng\házi\6\counting.py 
+The city 'Paris' appears 232 times in the dataset.
+
+Process finished with exit code 0
+```
+
+Here you can see the max temperature for that day:
+```python
+import pandas as pd
+
+parquet_path = "c:/data_eng/házi/6/m13sparkstreaming/hotel-weather/year=2016/month=10/day=31/"
+city_name = "Paris"  # the actual city's name
+
+# Parquet reading
+df = pd.read_parquet(parquet_path, engine="pyarrow")
+
+# Filter for the city
+city_df = df[df["city"] == city_name]
+
+# Max temp calculation
+max_temp = city_df["avg_tmpr_c"].max()
+print(f"{city_name} Max temp in the city: {max_temp} °C")
+```
+```python
+C:\data_eng\házi\6\.venv\Scripts\python.exe C:\data_eng\házi\6\min_hőm.py 
+Paris Max temp in the city: 10.7 °C
+
+Process finished with exit code 0
+```
+
+And here you can see the minimum temperature for Paris for that particular day:
+```python
+import pandas as pd
+
+parquet_path = "c:/data_eng/házi/6/m13sparkstreaming/hotel-weather/year=2016/month=10/day=31/"
+city_name = "Paris"  # the actual city's name
+
+# Parquet reading
+df = pd.read_parquet(parquet_path, engine="pyarrow")
+
+# Filter for the city
+city_df = df[df["city"] == city_name]
+
+# Min temp calculation
+min_temp = city_df["avg_tmpr_c"].min()
+print(f"{city_name} Min temp in the city: {min_temp} °C")
+```
+```python
+C:\data_eng\házi\6\.venv\Scripts\python.exe C:\data_eng\házi\6\min_hőm.py 
+Paris Max temp in the city: 10.7 °C
+
+Process finished with exit code 0
+```
