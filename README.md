@@ -909,8 +909,8 @@ The actual execution plan with comments:
 
 ```python
 == Parsed Logical Plan == 
--- Aggregation operation on city, year, month, and day to calculate distinct hotels, average temperature, max temperature, and min temperature
--- This step is computationally expensive because it involves grouping the data by multiple columns and performing aggregation functions on potentially large datasets.
+# Aggregation operation on city, year, month, and day to calculate distinct hotels, average temperature, max temperature, and min temperature
+# This step is computationally expensive because it involves grouping the data by multiple columns and performing aggregation functions on potentially large datasets.
 'Aggregate ['city, 'year, 'month, 'day], ['city, 'year, 'month, 'day, 'approx_count_distinct('id) AS distinct_hotels#285638, 'avg('avg_tmpr_c) AS avg_temp#285639, 'max('avg_tmpr_c) AS max_temp#285640, 'min('avg_tmpr_c) AS min_temp#285641]
 +- Project [address#285547, avg_tmpr_c#285548, avg_tmpr_f#285549, city#285550, country#285551, geoHash#285552, id#285553, latitude#285554, longitude#285555, name#285556, wthr_date#285569, year#285582, month#285595, dayofmonth(cast(wthr_date#285569 as date)) AS day#285609]
    +- Project [address#285547, avg_tmpr_c#285548, avg_tmpr_f#285549, city#285550, country#285551, geoHash#285552, id#285553, latitude#285554, longitude#285555, name#285556, wthr_date#285569, year#285582, month(cast(wthr_date#285569 as date)) AS month#285595]
@@ -919,8 +919,8 @@ The actual execution plan with comments:
             +- Relation [address#285547, avg_tmpr_c#285548, avg_tmpr_f#285549, city#285550, country#285551, geoHash#285552, id#285553, latitude#285554, longitude#285555, name#285556, wthr_date#285557] parquet
 
 == Analyzed Logical Plan == 
--- Data types of each column after analysis: city (string), year (int), month (int), day (int), distinct_hotels (bigint), avg_temp (double), max_temp (double), min_temp (double)
--- Analysis step ensures data types are correct, but does not involve heavy computation.
+# Data types of each column after analysis: city (string), year (int), month (int), day (int), distinct_hotels (bigint), avg_temp (double), max_temp (double), min_temp (double)
+# Analysis step ensures data types are correct, but does not involve heavy computation.
 Aggregate [city#285550, year#285582, month#285595, day#285609], [city#285550, year#285582, month#285595, day#285609, approx_count_distinct(id#285553, 0.05, 0, 0) AS distinct_hotels#285638L, avg(avg_tmpr_c#285548) AS avg_temp#285639, max(avg_tmpr_c#285548) AS max_temp#285640, min(avg_tmpr_c#285548) AS min_temp#285641]
 +- Project [address#285547, avg_tmpr_c#285548, avg_tmpr_f#285549, city#285550, country#285551, geoHash#285552, id#285553, latitude#285554, longitude#285555, name#285556, wthr_date#285569, year#285582, month#285595, dayofmonth(cast(wthr_date#285569 as date)) AS day#285609]
    +- Project [address#285547, avg_tmpr_c#285548, avg_tmpr_f#285549, city#285550, country#285551, geoHash#285552, id#285553, latitude#285554, longitude#285555, name#285556, wthr_date#285569, year#285582, month(cast(wthr_date#285569 as date)) AS month#285595]
@@ -929,16 +929,16 @@ Aggregate [city#285550, year#285582, month#285595, day#285609], [city#285550, ye
             +- Relation [address#285547, avg_tmpr_c#285548, avg_tmpr_f#285549, city#285550, country#285551, geoHash#285552, id#285553, latitude#285554, longitude#285555, name#285556, wthr_date#285557] parquet
 
 == Optimized Logical Plan == 
--- The plan after optimization, focusing on better performance for aggregate operations
--- Optimizing the grouping and aggregate steps to minimize unnecessary data shuffling and improve query efficiency.
+# The plan after optimization, focusing on better performance for aggregate operations
+# Optimizing the grouping and aggregate steps to minimize unnecessary data shuffling and improve query efficiency.
 Aggregate [city#285550, year#285582, month#285595, day#285609], [city#285550, year#285582, month#285595, day#285609, approx_count_distinct(id#285553, 0.05) AS distinct_hotels#285638L, avg(avg_tmpr_c#285548) AS avg_temp#285639, max(avg_tmpr_c#285548) AS max_temp#285640, min(avg_tmpr_c#285548) AS min_temp#285641]
 +- Project [avg_tmpr_c#285548, city#285550, id#285553, year(cast(wthr_date#285569 as date)) AS year#285582, month(cast(wthr_date#285569 as date)) AS month#285595, dayofmonth(cast(wthr_date#285569 as date)) AS day#285609]
    +- Project [avg_tmpr_c#285548, city#285550, id#285553, cast(wthr_date#285557 as timestamp) AS wthr_date#285569]
       +- Relation [address#285547, avg_tmpr_c#285548, avg_tmpr_f#285549, city#285550, country#285551, geoHash#285552, id#285553, latitude#285554, longitude#285555, name#285556, wthr_date#285557] parquet
 
 == Physical Plan == 
--- Initial stage of the physical plan, considering parallel execution and partitioning
--- The physical plan is where Spark decides how to execute the plan, including how to partition data across multiple nodes and handle shuffling.
+# Initial stage of the physical plan, considering parallel execution and partitioning
+# The physical plan is where Spark decides how to execute the plan, including how to partition data across multiple nodes and handle shuffling.
 AdaptiveSparkPlan isFinalPlan=false
 +- == Initial Plan == 
    HashAggregate(keys=[city#285550, year#285582, month#285595, day#285609], functions=[finalmerge_approx_count_distinct(merge buffer#285872) AS approx_count_distinct(id#285553, 0.05)#285746L, finalmerge_avg(merge sum#285864, count#285865L) AS avg(avg_tmpr_c#285548)#285747, finalmerge_max(merge max#285867) AS max(avg_tmpr_c#285548)#285748, finalmerge_min(merge min#285869) AS min(avg_tmpr_c#285548)#285749], output=[city#285550, year#285582, month#285595, day#285609, distinct_hotels#285638L, avg_temp#285639, max_temp#285640, min_temp#285641])
