@@ -956,3 +956,260 @@ The data needs to be redistributed across nodes so that related records are proc
 
 FileScan:
 Reading Parquet files can be time-consuming, especially when dealing with large amounts of data or distributed storage. The efficiency of file reading depends on how the data is partitioned and stored.
+
+### Visualize incoming data in Databricks Notebook for 10 biggest cities (the biggest number of hotels in the city, one chart for one city)
+
+By this task I also used the local uploading script to simulate to data streaming, then I created a streaming pipeline in Databricks using PySpark to process hotel and weather data from Azure Blob Storage. It reads the data in Parquet format, casts and extracts timestamps, and aggregates the information by city and date to calculate the number of distinct hotels and temperature statistics. The results are continuously written into a Delta table with checkpointing enabled. Finally, the aggregated data is read in batch mode, registered as a temporary SQL view, and queried to find the top 10 cities with the most distinct hotels and to retrieve detailed statistics for specific cities like Paris. Finally I created visualization for each 10 cities. 
+
+The local uploading script:
+
+```python
+import os
+import time
+from azure.storage.blob import BlobServiceClient
+from dotenv import load_dotenv
+load_dotenv()
+
+connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+
+# Name of the container in your Azure Blob Storage
+container_name = os.getenv("CONTAINER_NAME")
+
+# Local root folder containing your weather data (with subfolders like year=..., month=..., day=...)
+local_root_folder = "c:/data_eng/házi/6/m13sparkstreaming/hotel-weather/"
+
+# Delay between days (in seconds)
+delay_seconds = 15
+
+# Create a BlobServiceClient using the connection string
+blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+
+# Get a reference to the container
+container_client = blob_service_client.get_container_client(container_name)
+
+#MAIN LOGIC: Upload day-by-day with delay in between
+
+# Walk through folders
+for year in sorted(os.listdir(local_root_folder)):
+    year_path = os.path.join(local_root_folder, year)
+    if not os.path.isdir(year_path):
+        continue  # Skip if not a directory
+
+    for month in sorted(os.listdir(year_path)):
+        month_path = os.path.join(year_path, month)
+        if not os.path.isdir(month_path):
+            continue
+
+        for day in sorted(os.listdir(month_path)):
+            day_path = os.path.join(month_path, day)
+            if not os.path.isdir(day_path):
+                continue
+
+            print(f"Uploading data for: {day_path}")
+
+            # Upload all .parquet files for the current day (no delay between files)
+            for filename in os.listdir(day_path):
+                if filename.endswith(".parquet"):
+                    local_file_path = os.path.join(day_path, filename)
+
+                    # Build the relative blob path (preserving folder structure inside 'hotel-weather/')
+                    relative_path = os.path.relpath(local_file_path, local_root_folder)
+                    blob_path = f"hotel-weather/{relative_path.replace(os.sep, '/')}"
+
+                    print(f"Uploading: {blob_path}")
+
+                    # Open the file and upload it to Azure Blob Storage
+                    with open(local_file_path, "rb") as file:
+                        container_client.upload_blob(name=blob_path, data=file, overwrite=True)
+
+            print(f"Finished uploading files for {day_path}.\n")
+
+            # Wait before moving to the next day
+            time.sleep(delay_seconds)
+
+print("All weather data successfully uploaded day by day!")
+```
+
+The first cell in the databricks:
+
+```python
+from pyspark.sql.functions import year, month, dayofmonth, col, approx_count_distinct, avg, max, min, to_date
+from pyspark.sql.types import StructType, StringType, DoubleType, TimestampType
+
+# Read secrets for accessing Azure Blob Storage
+storage_account = dbutils.secrets.get(scope="streaming", key="AZURE_STORAGE_ACCOUNT_NAME")
+storage_key = dbutils.secrets.get(scope="streaming", key="AZURE_STORAGE_ACCOUNT_KEY")
+container = dbutils.secrets.get(scope="streaming", key="AZURE_CONTAINER_NAME")
+
+# Set Spark configuration to access Azure Blob Storage
+spark.conf.set(
+    f"fs.azure.account.key.{storage_account}.blob.core.windows.net",
+    storage_key
+)
+
+# Define schema for the input Parquet files
+schema = StructType() \
+    .add("address", StringType()) \
+    .add("avg_tmpr_c", DoubleType()) \
+    .add("avg_tmpr_f", DoubleType()) \
+    .add("city", StringType()) \
+    .add("country", StringType()) \
+    .add("geoHash", StringType()) \
+    .add("id", StringType()) \
+    .add("latitude", DoubleType()) \
+    .add("longitude", DoubleType()) \
+    .add("name", StringType()) \
+    .add("wthr_date", StringType())  # Will be casted to TimestampType later
+
+# Streaming reading from hotel-weather directory
+df = (spark.readStream
+      .format("cloudFiles")
+      .option("cloudFiles.format", "parquet")
+      .schema(schema)
+      .option("cloudFiles.maxFilesPerTrigger", 15)
+      .load(f"wasbs://{container}@{storage_account}.blob.core.windows.net/hotel-weather/"))
+
+# Timestamp type convert and date extract
+df = df.withColumn("wthr_date", col("wthr_date").cast(TimestampType()))
+df = df.withColumn("date", to_date("wthr_date"))
+
+# Aggregation by city and date
+agg_df = df.groupBy("city", "date").agg(
+    approx_count_distinct("id").alias("distinct_hotels"),
+    avg("avg_tmpr_c").alias("avg_temp"),
+    max("avg_tmpr_c").alias("max_temp"),
+    min("avg_tmpr_c").alias("min_temp")
+)
+
+```
+The second cell:
+
+```python
+# Start a streaming write query on the aggregated DataFrame (agg_df)
+agg_query = (agg_df.writeStream
+             # Use "complete" output mode to write the full aggregated result each time (suitable for aggregations)
+             .outputMode("complete")
+             # Specify the sink format as Delta Lake
+             .format("delta")
+             # Set the location to store checkpoint data (to maintain streaming state and recover from failures)
+             .option("checkpointLocation", f"wasbs://{container}@{storage_account}.blob.core.windows.net/checkpoints/hotel-weather-agg")  
+             # Set the output path in Azure Blob Storage where the Delta table will be written
+             .option("path", f"wasbs://{container}@{storage_account}.blob.core.windows.net/delta/agg_city")
+             .trigger(processingTime="20 seconds")
+             # Start the streaming query
+             .start())
+```
+The streaming progress of the incoming data:
+
+![vis_dashb](https://github.com/user-attachments/assets/550c99a5-533a-457f-a200-267a7980bbb9)
+
+Third cell:
+
+```python
+  # Read the aggregated Delta table as a batch DataFrame from Azure Blob Storage
+agg_batch_df = spark.read.format("delta").load(f"wasbs://{container}@{storage_account}.blob.core.windows.net/delta/agg_city")
+
+# Register the DataFrame as a temporary SQL view called "agg_view"
+# This allows running SQL queries directly on the DataFrame using Spark SQL
+agg_batch_df.createOrReplaceTempView("agg_view")
+```
+
+Fourth cell:
+
+```python
+%sql
+-- Find top 10 cities with the most distinct hotels
+SELECT city, SUM(distinct_hotels) AS total_hotels
+FROM agg_view
+GROUP BY city
+ORDER BY total_hotels DESC
+LIMIT 10
+```
+The output of the query:
+
+![vis_top10](https://github.com/user-attachments/assets/fc6b7e99-d65e-4a8f-8503-1d4663973e7b)
+
+Here come the query results and visualizations of the top 20 cities (by some cases I zoomed in the chart to a smaller time range to see the actual bars).
+
+### Paris:
+
+![par_table](https://github.com/user-attachments/assets/8714e779-ade5-4a32-8ab4-21bc62e439f5)
+
+![vis_par](https://github.com/user-attachments/assets/5da9839f-4e5b-40b2-b275-b48355f089e2)
+
+### London:
+
+![tab_lon](https://github.com/user-attachments/assets/efb75a2d-e47c-47e1-a976-496ee981dc37)
+
+![vis_lon](https://github.com/user-attachments/assets/4bf0a9cb-4bcd-499e-b63f-d9b644d63ce2)
+
+### Milan:
+
+![tab_mil](https://github.com/user-attachments/assets/6b2837b9-5677-4af8-92ad-05a90f5eace0)
+
+![vis_mil](https://github.com/user-attachments/assets/a0afb36b-5330-494b-ad0c-0d3ce924f2a8)
+
+### Barcelona:
+
+![tab_bar](https://github.com/user-attachments/assets/9d2b230b-dbcd-4e80-bd92-6d9800ad7909)
+
+![vis_bar](https://github.com/user-attachments/assets/dffcb011-0202-4726-bd58-72f416152651)
+
+### Amsterdam:
+
+![tab_amst](https://github.com/user-attachments/assets/992d1571-52b1-4d56-a1c2-e6b5aac7e6a6)
+
+![vis_amst](https://github.com/user-attachments/assets/4b6e0514-ad80-49cc-8442-1fb30a24449d)
+
+### Paddington:
+
+![tab_pad](https://github.com/user-attachments/assets/aeb8a252-bf7d-4a5d-a491-eded3aa1b3f7)
+
+![vis_pad](https://github.com/user-attachments/assets/bce8a28e-7dbf-43b8-b382-f7338bcfe6ef)
+
+### Springfield:
+
+![tab_spr](https://github.com/user-attachments/assets/6a19284f-d2e9-41f1-874d-5d98c35d6830)
+
+![vis_spr](https://github.com/user-attachments/assets/9a366271-de4c-49e2-8441-b1feba202cb6)
+
+### Houston:
+
+![tab_hou](https://github.com/user-attachments/assets/68f330ff-6683-4c45-bbff-c9eb9009b495)
+
+![vis_hou](https://github.com/user-attachments/assets/30b0e324-629a-4d19-8185-fcb7339f08bb)
+
+### Alberquerque:
+
+![tab_alb](https://github.com/user-attachments/assets/5816f888-ff38-4a60-923b-6dc5e1592418)
+
+![vis_alb](https://github.com/user-attachments/assets/88bb9e3d-b23b-4800-98f6-969d22fb46ea)
+
+### Virginia Beach:
+
+![tabl_vb](https://github.com/user-attachments/assets/57d3118c-c734-4dfb-95b4-71e98517670d)
+
+![vis_vb](https://github.com/user-attachments/assets/7ad6ff63-e791-4563-aafe-c4edd9714bcf)
+
+### San Francisco:
+
+![tab_SF](https://github.com/user-attachments/assets/1bd6c605-60ad-4fd1-91d9-08f9a002fb25)
+
+![vis_sf](https://github.com/user-attachments/assets/54458137-6a5f-4d79-ac52-99da66b1c904)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
