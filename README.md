@@ -1198,6 +1198,122 @@ Here come the query results and visualizations of the top 20 cities (by some cas
 ![vis_sf](https://github.com/user-attachments/assets/54458137-6a5f-4d79-ac52-99da66b1c904)
 
 
+Information about the used cluster:
+
+![cluster](https://github.com/user-attachments/assets/7f5160f6-0a5b-4dc0-a3ab-a6a7f0c0d30f)
+
+By this taks I applied the execution plan by the aggregation part and the streaming query.
+
+Execution plan of the aggregation:
+
+```python
+== Parsed Logical Plan ==
+
+# Perform aggregation: group by 'city' and 'date', and calculate distinct hotel count, average, max, and min temperatures.
+'Aggregate ['city, 'date], ['city, 'date, 'approx_count_distinct('id) AS distinct_hotels, 'avg('avg_tmpr_c) AS avg_temp, 'max('avg_tmpr_c) AS max_temp, 'min('avg_tmpr_c) AS min_temp]
+
+# Project the necessary columns and parse 'wthr_date' into a 'date' type.
++- ~Project [..., to_date(wthr_date) AS date]
+
+# Cast the original 'wthr_date' field from string to timestamp.
+   +- ~Project [..., cast(wthr_date as timestamp) AS wthr_date]
+
+# Read the streaming data from a cloud file source (Parquet format) using Auto Loader.
+      +- ~StreamingRelation DataSource(...)
+
+== Analyzed Logical Plan ==
+
+# Define output columns and types after analyzing the logical structure.
+city: string, date: date, distinct_hotels: bigint, avg_temp: double, max_temp: double, min_temp: double
+
+# Aggregation after resolving expressions and data types.
+~Aggregate [city, date], [city, date, approx_count_distinct(id), avg(avg_tmpr_c), max(avg_tmpr_c), min(avg_tmpr_c)]
+
+# Project the necessary columns and parse 'wthr_date' into a 'date' type.
++- ~Project [..., to_date(wthr_date) AS date]
+
+# Cast 'wthr_date' string into timestamp.
+   +- ~Project [..., cast(wthr_date as timestamp) AS wthr_date]
+
+# Read streaming data from the cloud (Auto Loader).
+      +- ~StreamingRelation DataSource(...)
+
+== Optimized Logical Plan ==
+
+# Final aggregation: keeping only essential columns and computation for efficiency.
+~Aggregate [city, date], [city, date, approx_count_distinct(id), avg(avg_tmpr_c), max(avg_tmpr_c), min(avg_tmpr_c)]
+
+# Drop unnecessary columns to minimize data movement; cast 'wthr_date' properly.
++- ~Project [avg_tmpr_c, city, id, cast(cast(wthr_date as timestamp) as date) AS date]
+
+# Streaming data input remains unchanged.
+   +- ~StreamingRelation DataSource(...)
+
+== Physical Plan ==
+
+# Final stage aggregation: produces the final output.
+*(4) HashAggregate(keys=[city, date], functions=[finalmerge_...])
+
+# Save final aggregated state to the State Store (for continuous streaming processing).
++- StateStoreSave [city, date], state info [...], Append, ...
+
+# Merge aggregation buffers from previous steps.
+   +- *(3) HashAggregate(keys=[city, date], functions=[merge_...])
+
+# Restore previous partial aggregation states from State Store (important for fault-tolerance).
+      +- StateStoreRestore [city, date], state info [...], ...
+
+# Merge intermediate results grouped by 'city' and 'date'.
+         +- *(2) HashAggregate(keys=[city, date], functions=[merge_...])
+
+# Shuffle data by 'city' and 'date' to ensure correct partitioning for stateful operations.
+            +- Exchange hashpartitioning(city, date, 200), REQUIRED_BY_STATEFUL_OPERATOR
+
+# Partial aggregation: compute local aggregates before shuffling (efficient).
+               +- *(1) HashAggregate(keys=[city, date], functions=[partial_...])
+
+# Project necessary fields and cast 'wthr_date' properly.
+                  +- *(1) Project [avg_tmpr_c, city, id, cast(cast(wthr_date as timestamp) as date)]
+
+# Stream data read from cloud storage using Auto Loader.
+                     +- StreamingRelation cloudFiles, [...]
+
+```
+
+Execution plan of the streaming query:
+
+```python
+# Final aggregation stage: compute final values (distinct hotels, avg temp, max temp, min temp) after merging intermediate results
+*(4) HashAggregate(keys=[city#351571, date#189], functions=[finalmerge_approx_count_distinct(merge buffer#351809) AS approx_count_distinct(id#351574, 0.05)#322L, finalmerge_avg(merge sum#351801, count#351802L) AS avg(avg_tmpr_c#351569)#323, finalmerge_max(merge max#351804) AS max(avg_tmpr_c#351569)#324, finalmerge_min(merge min#351806) AS min(avg_tmpr_c#351569)#325], output=[city#351571, date#189, distinct_hotels#214L, avg_temp#215, max_temp#216, min_temp#217])
+
+# Save the aggregated state into State Store (for fault-tolerant recovery and exactly-once semantics)
++- StateStoreSave [city#351571, date#189], state info [ checkpoint = wasbs://[REDACTED]@[REDACTED].blob.core.windows.net/checkpoints/hotel-weather-agg/state, runId = 67a0f8a3-8500-49d9-871c-eafcf831b2cc, opId = 0, ver = 65, numPartitions = 200], Complete, 0, 0, 2
+
+    # Merge intermediate aggregation results from previous state
+    +- *(3) HashAggregate(keys=[city#351571, date#189], functions=[merge_approx_count_distinct(merge buffer#351809) AS buffer#351809, merge_avg(merge sum#351801, count#351802L) AS (sum#351801, count#351802L), merge_max(merge max#351804) AS max#351804, merge_min(merge min#351806) AS min#351806], output=[city#351571, date#189, buffer#351809, sum#351801, count#351802L, max#351804, min#351806])
+
+        # Restore previously saved state from State Store (for incremental aggregation)
+        +- StateStoreRestore [city#351571, date#189], state info [ checkpoint = wasbs://[REDACTED]@[REDACTED].blob.core.windows.net/checkpoints/hotel-weather-agg/state, runId = 67a0f8a3-8500-49d9-871c-eafcf831b2cc, opId = 0, ver = 65, numPartitions = 200], 2
+
+            # Partial merge of aggregation across partitions after shuffle
+            +- *(2) HashAggregate(keys=[city#351571, date#189], functions=[merge_approx_count_distinct(merge buffer#351809) AS buffer#351809, merge_avg(merge sum#351801, count#351802L) AS (sum#351801, count#351802L), merge_max(merge max#351804) AS max#351804, merge_min(merge min#351806) AS min#351806], output=[city#351571, date#189, buffer#351809, sum#351801, count#351802L, max#351804, min#351806])
+
+                # Shuffle the data by (city, date) keys for aggregation (required by the stateful operation)
+                +- Exchange hashpartitioning(city#351571, date#189, 200), REQUIRED_BY_STATEFUL_OPERATOR, [plan_id=27405]
+
+                    # First step of aggregation: compute partial aggregates within each partition
+                    +- *(1) HashAggregate(keys=[city#351571, date#189], functions=[partial_approx_count_distinct(id#351574, 0.05) AS buffer#351809, partial_avg(avg_tmpr_c#351569) AS (sum#351801, count#351802L), partial_max(avg_tmpr_c#351569) AS max#351804, partial_min(avg_tmpr_c#351569) AS min#351806], output=[city#351571, date#189, buffer#351809, sum#351801, count#351802L, max#351804, min#351806])
+
+                        # Select necessary columns and cast the date field properly
+                        +- *(1) Project [avg_tmpr_c#351569, city#351571, id#351574, cast(cast(wthr_date#351578 as timestamp) as date) AS date#189]
+
+                            # Convert from columnar batches to rows (necessary for aggregation processing)
+                            +- *(1) ColumnarToRow
+
+                                # Read parquet files containing weather data
+                                +- FileScan parquet [avg_tmpr_c#351569,city#351571,id#351574,wthr_date#351578] Batched: true, DataFilters: [], Format: Parquet, Location: CloudFilesSourceFileIndex(1 paths)[wasbs://[REDACTED]@[REDACTED].blob.core.windows.net/hotel-weather], PartitionFilters: [], PushedFilters: [], ReadSchema: struct<avg_tmpr_c:double,city:string,id:string,wthr_date:string>
+```
+
 
 
 
