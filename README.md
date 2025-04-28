@@ -2361,7 +2361,7 @@ The dashboard of the Task_2_a notebook:
 
 ![cicd_task2_dashb](https://github.com/user-attachments/assets/cd64aa57-fb2c-4827-864b-289e5ef862b9)
 
-I initiated the job of the Task_2_b from CMD:
+Originally I initiated the job of the Task_2_b from CMD:
 
 ```python
 c:\data_eng\házi\6>databricks jobs run-now --job-id 916817301917295
@@ -2372,6 +2372,8 @@ WARN: Your CLI is configured to use Jobs API 2.0. In order to use the latest Job
 }
 
 ```
+But to being able to visualize the tables I initiated the notebook from the Workspace menu.
+
 Here you can see the list of the 10 biggest cities, then the tables of them and the related visualizations:
 
 ![cicd_table_par](https://github.com/user-attachments/assets/d6f8ec9e-13d0-4cba-bb92-e4ac7ee43a10)
