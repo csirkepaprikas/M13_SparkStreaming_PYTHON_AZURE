@@ -1314,6 +1314,1141 @@ Execution plan of the streaming query:
                                 +- FileScan parquet [avg_tmpr_c#351569,city#351571,id#351574,wthr_date#351578] Batched: true, DataFilters: [], Format: Parquet, Location: CloudFilesSourceFileIndex(1 paths)[wasbs://[REDACTED]@[REDACTED].blob.core.windows.net/hotel-weather], PartitionFilters: [], PushedFilters: [], ReadSchema: struct<avg_tmpr_c:double,city:string,id:string,wthr_date:string>
 ```
 
+### CI/CD
+
+For the CI/CD task I made 3 notebooks, 1 for the first task and 2 for the second.
+
+Notebook for the task Using Spark calculate in Databricks Notebooks for each city each day:
+
+```python
+from pyspark.sql.functions import year, month, dayofmonth, col, approx_count_distinct, avg, max, min
+from pyspark.sql.types import StructType, StringType, DoubleType, TimestampType
+
+# Read secrets for accessing Azure Blob Storage
+storage_account = dbutils.secrets.get(scope="streaming", key="AZURE_STORAGE_ACCOUNT_NAME")
+storage_key = dbutils.secrets.get(scope="streaming", key="AZURE_STORAGE_ACCOUNT_KEY")
+container = dbutils.secrets.get(scope="streaming", key="AZURE_CONTAINER_NAME")
+
+# Set Spark configuration to access Azure Blob Storage
+spark.conf.set(
+    f"fs.azure.account.key.{storage_account}.blob.core.windows.net",
+    storage_key
+)
+
+# Define schema for the input Parquet files
+schema = StructType() \
+    .add("address", StringType()) \
+    .add("avg_tmpr_c", DoubleType()) \
+    .add("avg_tmpr_f", DoubleType()) \
+    .add("city", StringType()) \
+    .add("country", StringType()) \
+    .add("geoHash", StringType()) \
+    .add("id", StringType()) \
+    .add("latitude", DoubleType()) \
+    .add("longitude", DoubleType()) \
+    .add("name", StringType()) \
+    .add("wthr_date", StringType())  # Will be casted to TimestampType later
+
+# Load streaming data using Auto Loader
+df = (spark.readStream
+      .format("cloudFiles")
+      .option("cloudFiles.format", "parquet")
+      .option("cloudFiles.includeExistingFiles", "false")
+      .option("cloudFiles.useIncrementalListing", "true")
+      .option("cloudFiles.maxFilesPerTrigger", 15)
+      .schema(schema)
+      .load(f"wasbs://{container}@{storage_account}.blob.core.windows.net/hotel-weather/"))
+
+# Convert wthr_date string to TimestampType (to make it easier for grouping)
+df = df.withColumn("wthr_date", col("wthr_date").cast(TimestampType()))
+
+# Add year, month, and day columns for grouping
+df_with_date_parts = df.withColumn("year", year("wthr_date")) \
+    .withColumn("month", month("wthr_date")) \
+    .withColumn("day", dayofmonth("wthr_date"))
+
+# Add watermark to handle late data
+df_with_watermark = df_with_date_parts.withWatermark("wthr_date", "1 day")  # Watermark for late data handling
+
+# Aggregate data per city per day
+aggregated = (
+    df_with_watermark
+    .groupBy("city", "year", "month", "day")  # Grouping by city and the date parts
+    .agg(
+        approx_count_distinct("id").alias("distinct_hotels"),  # Counting distinct hotels
+        avg("avg_tmpr_c").alias("avg_temp"),  # Average temperature
+        max("avg_tmpr_c").alias("max_temp"),  # Max temperature
+        min("avg_tmpr_c").alias("min_temp")   # Min temperature
+    )
+)
+
+# Write the aggregated streaming output to console with complete mode
+query = (
+    aggregated.writeStream
+    .outputMode("complete")  # Use complete mode for streaming aggregations
+    .format("console")
+    .option("truncate", False)
+    .option("checkpointLocation", f"wasbs://{container}@{storage_account}.blob.core.windows.net/checkpoints/hotel-weather-agg")  # Set checkpoint directory
+    .trigger(processingTime="20 seconds")
+    .start()
+)
+```
+
+For the second task, Visualize incoming data in Databricks Notebook for 10 biggest cities (the biggest number of hotels in the city, one chart for one city) I made two notebooks to being able to initiate the data reading from delta table and the creation of the temporary table whenever we need, independently the reading, streaming processes. Also ptimized the query of the 10 biggest city querys to execute them in a single for cycle:
+
+```python
+from pyspark.sql.functions import year, month, dayofmonth, col, approx_count_distinct, avg, max, min, to_date
+from pyspark.sql.types import StructType, StringType, DoubleType, TimestampType
+
+# Read secrets for accessing Azure Blob Storage
+storage_account = dbutils.secrets.get(scope="streaming", key="AZURE_STORAGE_ACCOUNT_NAME")
+storage_key = dbutils.secrets.get(scope="streaming", key="AZURE_STORAGE_ACCOUNT_KEY")
+container = dbutils.secrets.get(scope="streaming", key="AZURE_CONTAINER_NAME")
+
+# Set Spark configuration to access Azure Blob Storage
+spark.conf.set(
+    f"fs.azure.account.key.{storage_account}.blob.core.windows.net",
+    storage_key
+)
+
+# Define schema for the input Parquet files
+schema = StructType() \
+    .add("address", StringType()) \
+    .add("avg_tmpr_c", DoubleType()) \
+    .add("avg_tmpr_f", DoubleType()) \
+    .add("city", StringType()) \
+    .add("country", StringType()) \
+    .add("geoHash", StringType()) \
+    .add("id", StringType()) \
+    .add("latitude", DoubleType()) \
+    .add("longitude", DoubleType()) \
+    .add("name", StringType()) \
+    .add("wthr_date", StringType())  # Will be casted to TimestampType later
+
+# Streaming reading from hotel-weather directory
+df = (spark.readStream
+      .format("cloudFiles")
+      .option("cloudFiles.format", "parquet")
+      .schema(schema)
+      .option("cloudFiles.maxFilesPerTrigger", 15)
+      .load(f"wasbs://{container}@{storage_account}.blob.core.windows.net/hotel-weather/"))
+
+# Timestamp type convert and date extract
+df = df.withColumn("wthr_date", col("wthr_date").cast(TimestampType()))
+df = df.withColumn("date", to_date("wthr_date"))
+
+# Aggregation by city and date
+agg_df = df.groupBy("city", "date").agg(
+    approx_count_distinct("id").alias("distinct_hotels"),
+    avg("avg_tmpr_c").alias("avg_temp"),
+    max("avg_tmpr_c").alias("max_temp"),
+    min("avg_tmpr_c").alias("min_temp")
+)
+
+# Start a streaming write query on the aggregated DataFrame (agg_df)
+agg_query = (agg_df.writeStream
+             # Use "complete" output mode to write the full aggregated result each time (suitable for aggregations)
+             .outputMode("complete")
+             # Specify the sink format as Delta Lake
+             .format("delta")
+             # Set the location to store checkpoint data (to maintain streaming state and recover from failures)
+             .option("checkpointLocation", f"wasbs://{container}@{storage_account}.blob.core.windows.net/checkpoints/hotel-weather-agg")  
+             # Set the output path in Azure Blob Storage where the Delta table will be written
+             .option("path", f"wasbs://{container}@{storage_account}.blob.core.windows.net/delta/agg_city")
+             .trigger(processingTime="20 seconds")
+             # Start the streaming query
+             .start())
+
+```
+
+```python
+# Read the aggregated Delta table as a batch DataFrame from Azure Blob Storage
+agg_batch_df = spark.read.format("delta").load(f"wasbs://{container}@{storage_account}.blob.core.windows.net/delta/agg_city")
+
+# Register the DataFrame as a temporary SQL view called "agg_view"
+# This allows running SQL queries directly on the DataFrame using Spark SQL
+agg_batch_df.createOrReplaceTempView("agg_view")
+
+# Run the query and save the result in a variable
+result = spark.sql("""
+SELECT city, SUM(distinct_hotels) AS total_hotels
+FROM agg_view
+GROUP BY city
+ORDER BY total_hotels DESC
+LIMIT 10
+""")
+
+# Save the cities' names in a list
+top_10_cities = [row['city'] for row in result.collect()]
+
+# Print the list
+print(top_10_cities)
+
+# Iterate through the cities and display the aggregated data
+for city in top_10_cities:
+    query = f"""
+    SELECT date, distinct_hotels, avg_temp, max_temp, min_temp
+    FROM agg_view
+    WHERE city = '{city}'
+    ORDER BY date
+    """
+    display(sql(query))  
+
+```
+
+I also made a terraform main.tf terraform.tfvars and variables.tf files for the CI/CD execution.
+
+Here you can see the actual main.tf:
+
+```python
+terraform {
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = ">= 4.0.0"
+    }
+    databricks = {
+      source  = "databricks/databricks"
+      version = ">= 1.0.0"
+    }
+  }
+
+  backend "azurerm" {
+    resource_group_name  = "rgy"
+    storage_account_name = "de"
+    container_name       = "tfstate"
+    key                  = "terraform.tfstate"
+  }
+}
+
+provider "azurerm" {
+  features {}
+
+  subscription_id = var.AZURE_SUBSCRIPTION_ID
+  tenant_id       = var.AZURE_TENANT_ID
+  client_id       = var.AZURE_CLIENT_ID
+  client_secret   = var.AZURE_CLIENT_SECRET
+}
+
+provider "databricks" {
+  host  = var.DATABRICKS_HOST
+  token = var.DATABRICKS_TOKEN
+}
+
+
+data "databricks_spark_version" "latest_lts" {
+  long_term_support = true
+}
+
+resource "databricks_cluster" "stream" {
+  cluster_name           = "Azure_Spark_Streaming"
+  spark_version          = data.databricks_spark_version.latest_lts.id 
+  node_type_id           = "Standard_E4d_v4"
+  autotermination_minutes = 30
+
+  spark_conf = {
+    "spark.databricks.cluster.profile" = "singleNode"
+    "spark.master"                     = "local[*]"
+  }
+
+  custom_tags = {
+    "ResourceClass" = "SingleNode"
+  }
+}
+
+resource "azurerm_storage_account" "Azure_Spark_Streaming" {
+  name                     = var.STORAGE_ACCOUNT_NAME
+  resource_group_name       = var.RESOURCE_GROUP_NAME
+  location                 = "West Europe"
+  account_tier             = "Standard"
+  account_replication_type = "LRS"
+}
+
+resource "azurerm_storage_container" "data" {
+  name                  = ""
+  storage_account_name  = azurerm_storage_account.Azure_Spark_Streaming.name
+  container_access_type = "container"
+}
+
+
+resource "databricks_notebook" "Task_1" {
+  path     = "/cicd/Task_1"
+  source   = "${path.module}/Task_1.dbc"
+}
+
+resource "databricks_notebook" "Task_2_a" {
+  path     = "/cicd/Task_2_a"
+  source   = "${path.module}/Task_2_a.dbc"
+}
+
+resource "databricks_notebook" "Task_2_b" {
+  path     = "/cicd/Task_2_b"
+  source   = "${path.module}/Task_2_b.dbc"
+}
+
+resource "databricks_job" "Task_1" {
+  name = "Task_1"
+
+  task {
+    task_key = "Task_1"
+    
+    notebook_task {
+      notebook_path = databricks_notebook.Task_1.path
+    }
+
+    existing_cluster_id = databricks_cluster.stream.id
+  }
+}
+
+resource "databricks_job" "Task_2_a" {
+  name = "Task_2_a"
+
+  task {
+    task_key = "Task_2_a"
+    
+    notebook_task {
+      notebook_path = databricks_notebook.Task_2_a.path
+    }
+
+    existing_cluster_id = databricks_cluster.stream.id
+  }
+}
+
+resource "databricks_job" "Task_2_b" {
+  name = "Task_2_b"
+
+  task {
+    task_key = "Task_2_b"
+    
+    notebook_task {
+      notebook_path = databricks_notebook.Task_2_b.path
+    }
+
+    existing_cluster_id = databricks_cluster.stream.id
+  }
+}
+```
+
+For the simulation of the streaming data I used the same python script as by the former executions.
+
+I run the terraform init, terraform plan, then the terraform apply command:
+
+```python
+c:\data_eng\házi\6>terraform init
+Initializing the backend...
+Initializing provider plugins...
+- Reusing previous version of hashicorp/azurerm from the dependency lock file
+- Reusing previous version of databricks/databricks from the dependency lock file
+- Using previously-installed databricks/databricks v1.75.0
+- Using previously-installed hashicorp/azurerm v4.27.0
+
+Terraform has been successfully initialized!
+
+You may now begin working with Terraform. Try running "terraform plan" to see
+any changes that are required for your infrastructure. All Terraform commands
+should now work.
+
+If you ever set or change modules or backend configuration for Terraform,
+rerun this command to reinitialize your working directory. If you forget, other
+commands will detect it and remind you to do so if necessary.
+
+c:\data_eng\házi\6>terraform plan
+data.databricks_spark_version.latest_lts: Reading...
+data.databricks_spark_version.latest_lts: Read complete after 0s [id=15.4.x-scala2.12]
+
+Terraform used the selected providers to generate the following execution plan. Resource actions are indicated with the following symbols:
+  + create
+
+Terraform will perform the following actions:
+
+  # azurerm_storage_account.Azure_Spark_Streaming will be created
+  + resource "azurerm_storage_account" "Azure_Spark_Streaming" {
+      + access_tier                        = (known after apply)
+      + account_kind                       = "StorageV2"
+      + account_replication_type           = "LRS"
+      + account_tier                       = "Standard"
+      + allow_nested_items_to_be_public    = true
+      + cross_tenant_replication_enabled   = false
+      + default_to_oauth_authentication    = false
+      + dns_endpoint_type                  = "Standard"
+      + https_traffic_only_enabled         = true
+      + id                                 = (known after apply)
+      + infrastructure_encryption_enabled  = false
+      + is_hns_enabled                     = false
+      + large_file_share_enabled           = (known after apply)
+      + local_user_enabled                 = true
+      + location                           = "westeurope"
+      + min_tls_version                    = "TLS1_2"
+      + name                               = ""
+      + nfsv3_enabled                      = false
+      + primary_access_key                 = (sensitive value)
+      + primary_blob_connection_string     = (sensitive value)
+      + primary_blob_endpoint              = (known after apply)
+      + primary_blob_host                  = (known after apply)
+      + primary_blob_internet_endpoint     = (known after apply)
+      + primary_blob_internet_host         = (known after apply)
+      + primary_blob_microsoft_endpoint    = (known after apply)
+      + primary_blob_microsoft_host        = (known after apply)
+      + primary_connection_string          = (sensitive value)
+      + primary_dfs_endpoint               = (known after apply)
+      + primary_dfs_host                   = (known after apply)
+      + primary_dfs_internet_endpoint      = (known after apply)
+      + primary_dfs_internet_host          = (known after apply)
+      + primary_dfs_microsoft_endpoint     = (known after apply)
+      + primary_dfs_microsoft_host         = (known after apply)
+      + primary_file_endpoint              = (known after apply)
+      + primary_file_host                  = (known after apply)
+      + primary_file_internet_endpoint     = (known after apply)
+      + primary_file_internet_host         = (known after apply)
+      + primary_file_microsoft_endpoint    = (known after apply)
+      + primary_file_microsoft_host        = (known after apply)
+      + primary_location                   = (known after apply)
+      + primary_queue_endpoint             = (known after apply)
+      + primary_queue_host                 = (known after apply)
+      + primary_queue_microsoft_endpoint   = (known after apply)
+      + primary_queue_microsoft_host       = (known after apply)
+      + primary_table_endpoint             = (known after apply)
+      + primary_table_host                 = (known after apply)
+      + primary_table_microsoft_endpoint   = (known after apply)
+      + primary_table_microsoft_host       = (known after apply)
+      + primary_web_endpoint               = (known after apply)
+      + primary_web_host                   = (known after apply)
+      + primary_web_internet_endpoint      = (known after apply)
+      + primary_web_internet_host          = (known after apply)
+      + primary_web_microsoft_endpoint     = (known after apply)
+      + primary_web_microsoft_host         = (known after apply)
+      + public_network_access_enabled      = true
+      + queue_encryption_key_type          = "Service"
+      + resource_group_name                = ""
+      + secondary_access_key               = (sensitive value)
+      + secondary_blob_connection_string   = (sensitive value)
+      + secondary_blob_endpoint            = (known after apply)
+      + secondary_blob_host                = (known after apply)
+      + secondary_blob_internet_endpoint   = (known after apply)
+      + secondary_blob_internet_host       = (known after apply)
+      + secondary_blob_microsoft_endpoint  = (known after apply)
+      + secondary_blob_microsoft_host      = (known after apply)
+      + secondary_connection_string        = (sensitive value)
+      + secondary_dfs_endpoint             = (known after apply)
+      + secondary_dfs_host                 = (known after apply)
+      + secondary_dfs_internet_endpoint    = (known after apply)
+      + secondary_dfs_internet_host        = (known after apply)
+      + secondary_dfs_microsoft_endpoint   = (known after apply)
+      + secondary_dfs_microsoft_host       = (known after apply)
+      + secondary_file_endpoint            = (known after apply)
+      + secondary_file_host                = (known after apply)
+      + secondary_file_internet_endpoint   = (known after apply)
+      + secondary_file_internet_host       = (known after apply)
+      + secondary_file_microsoft_endpoint  = (known after apply)
+      + secondary_file_microsoft_host      = (known after apply)
+      + secondary_location                 = (known after apply)
+      + secondary_queue_endpoint           = (known after apply)
+      + secondary_queue_host               = (known after apply)
+      + secondary_queue_microsoft_endpoint = (known after apply)
+      + secondary_queue_microsoft_host     = (known after apply)
+      + secondary_table_endpoint           = (known after apply)
+      + secondary_table_host               = (known after apply)
+      + secondary_table_microsoft_endpoint = (known after apply)
+      + secondary_table_microsoft_host     = (known after apply)
+      + secondary_web_endpoint             = (known after apply)
+      + secondary_web_host                 = (known after apply)
+      + secondary_web_internet_endpoint    = (known after apply)
+      + secondary_web_internet_host        = (known after apply)
+      + secondary_web_microsoft_endpoint   = (known after apply)
+      + secondary_web_microsoft_host       = (known after apply)
+      + sftp_enabled                       = false
+      + shared_access_key_enabled          = true
+      + table_encryption_key_type          = "Service"
+
+      + blob_properties (known after apply)
+
+      + network_rules (known after apply)
+
+      + queue_properties (known after apply)
+
+      + routing (known after apply)
+
+      + share_properties (known after apply)
+
+      + static_website (known after apply)
+    }
+
+  # azurerm_storage_container.data will be created
+  + resource "azurerm_storage_container" "" {
+      + container_access_type             = "container"
+      + default_encryption_scope          = (known after apply)
+      + encryption_scope_override_enabled = true
+      + has_immutability_policy           = (known after apply)
+      + has_legal_hold                    = (known after apply)
+      + id                                = (known after apply)
+      + metadata                          = (known after apply)
+      + name                              = ""
+      + resource_manager_id               = (known after apply)
+      + storage_account_name              = "devwesteuropecy"
+    }
+
+  # databricks_cluster.stream will be created
+  + resource "databricks_cluster" "stream" {
+      + autotermination_minutes      = 30
+      + cluster_id                   = (known after apply)
+      + cluster_name                 = "Azure_Spark_Streaming"
+      + custom_tags                  = {
+          + "ResourceClass" = "SingleNode"
+        }
+      + default_tags                 = (known after apply)
+      + driver_instance_pool_id      = (known after apply)
+      + driver_node_type_id          = (known after apply)
+      + enable_elastic_disk          = (known after apply)
+      + enable_local_disk_encryption = (known after apply)
+      + id                           = (known after apply)
+      + node_type_id                 = "Standard_E4d_v4"
+      + num_workers                  = 0
+      + spark_conf                   = {
+          + "spark.databricks.cluster.profile" = "singleNode"
+          + "spark.master"                     = "local[*]"
+        }
+      + spark_version                = "15.4.x-scala2.12"
+      + state                        = (known after apply)
+      + url                          = (known after apply)
+    }
+
+  # databricks_job.Task_1 will be created
+  + resource "databricks_job" "Task_1" {
+      + always_running      = false
+      + control_run_state   = false
+      + format              = (known after apply)
+      + id                  = (known after apply)
+      + max_concurrent_runs = 1
+      + name                = "Task_1"
+      + url                 = (known after apply)
+
+      + run_as (known after apply)
+
+      + task {
+          + existing_cluster_id = (known after apply)
+          + retry_on_timeout    = (known after apply)
+          + task_key            = "Task_1"
+
+          + notebook_task {
+              + notebook_path = "/cicd/Task_1"
+            }
+        }
+    }
+
+  # databricks_job.Task_2_a will be created
+  + resource "databricks_job" "Task_2_a" {
+      + always_running      = false
+      + control_run_state   = false
+      + format              = (known after apply)
+      + id                  = (known after apply)
+      + max_concurrent_runs = 1
+      + name                = "Task_2_a"
+      + url                 = (known after apply)
+
+      + run_as (known after apply)
+
+      + task {
+          + existing_cluster_id = (known after apply)
+          + retry_on_timeout    = (known after apply)
+          + task_key            = "Task_2_a"
+
+          + notebook_task {
+              + notebook_path = "/cicd/Task_2_a"
+            }
+        }
+    }
+
+  # databricks_job.Task_2_b will be created
+  + resource "databricks_job" "Task_2_b" {
+      + always_running      = false
+      + control_run_state   = false
+      + format              = (known after apply)
+      + id                  = (known after apply)
+      + max_concurrent_runs = 1
+      + name                = "Task_2_b"
+      + url                 = (known after apply)
+
+      + run_as (known after apply)
+
+      + task {
+          + existing_cluster_id = (known after apply)
+          + retry_on_timeout    = (known after apply)
+          + task_key            = "Task_2_b"
+
+          + notebook_task {
+              + notebook_path = "/cicd/Task_2_b"
+            }
+        }
+    }
+
+  # databricks_notebook.Task_1 will be created
+  + resource "databricks_notebook" "Task_1" {
+      + format         = (known after apply)
+      + id             = (known after apply)
+      + language       = (known after apply)
+      + md5            = "different"
+      + object_id      = (known after apply)
+      + object_type    = (known after apply)
+      + path           = "/cicd/Task_1"
+      + source         = "./Task_1.dbc"
+      + url            = (known after apply)
+      + workspace_path = (known after apply)
+    }
+
+  # databricks_notebook.Task_2_a will be created
+  + resource "databricks_notebook" "Task_2_a" {
+      + format         = (known after apply)
+      + id             = (known after apply)
+      + language       = (known after apply)
+      + md5            = "different"
+      + object_id      = (known after apply)
+      + object_type    = (known after apply)
+      + path           = "/cicd/Task_2_a"
+      + source         = "./Task_2_a.dbc"
+      + url            = (known after apply)
+      + workspace_path = (known after apply)
+    }
+
+  # databricks_notebook.Task_2_b will be created
+  + resource "databricks_notebook" "Task_2_b" {
+      + format         = (known after apply)
+      + id             = (known after apply)
+      + language       = (known after apply)
+      + md5            = "different"
+      + object_id      = (known after apply)
+      + object_type    = (known after apply)
+      + path           = "/cicd/Task_2_b"
+      + source         = "./Task_2_b.dbc"
+      + url            = (known after apply)
+      + workspace_path = (known after apply)
+    }
+
+Plan: 9 to add, 0 to change, 0 to destroy.
+
+Changes to Outputs:
+  + job_ids = {
+      + Task_1   = (known after apply)
+      + Task_2_a = (known after apply)
+      + Task_2_b = (known after apply)
+    }
+╷
+│ Warning: Argument is deprecated
+│
+│   with azurerm_storage_container.,
+│   on main.tf line 66, in resource "azurerm_storage_container" "":
+│   66:   storage_account_name  = azurerm_storage_account.Azure_Spark_Streaming.name
+│
+│ the `storage_account_name` property has been deprecated in favour of `storage_account_id` and will be removed in version 5.0 of the Provider.
+╵
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Note: You didn't use the -out option to save this plan, so Terraform can't guarantee to take exactly these actions if you run "terraform apply" now.
+
+c:\data_eng\házi\6>terraform apply
+data.databricks_spark_version.latest_lts: Reading...
+data.databricks_spark_version.latest_lts: Read complete after 1s [id=15.4.x-scala2.12]
+
+Terraform used the selected providers to generate the following execution plan. Resource actions are indicated with the following symbols:
+  + create
+
+Terraform will perform the following actions:
+
+  # azurerm_storage_account.Azure_Spark_Streaming will be created
+  + resource "azurerm_storage_account" "Azure_Spark_Streaming" {
+      + access_tier                        = (known after apply)
+      + account_kind                       = "StorageV2"
+      + account_replication_type           = "LRS"
+      + account_tier                       = "Standard"
+      + allow_nested_items_to_be_public    = true
+      + cross_tenant_replication_enabled   = false
+      + default_to_oauth_authentication    = false
+      + dns_endpoint_type                  = "Standard"
+      + https_traffic_only_enabled         = true
+      + id                                 = (known after apply)
+      + infrastructure_encryption_enabled  = false
+      + is_hns_enabled                     = false
+      + large_file_share_enabled           = (known after apply)
+      + local_user_enabled                 = true
+      + location                           = "westeurope"
+      + min_tls_version                    = "TLS1_2"
+      + name                               = ""
+      + nfsv3_enabled                      = false
+      + primary_access_key                 = (sensitive value)
+      + primary_blob_connection_string     = (sensitive value)
+      + primary_blob_endpoint              = (known after apply)
+      + primary_blob_host                  = (known after apply)
+      + primary_blob_internet_endpoint     = (known after apply)
+      + primary_blob_internet_host         = (known after apply)
+      + primary_blob_microsoft_endpoint    = (known after apply)
+      + primary_blob_microsoft_host        = (known after apply)
+      + primary_connection_string          = (sensitive value)
+      + primary_dfs_endpoint               = (known after apply)
+      + primary_dfs_host                   = (known after apply)
+      + primary_dfs_internet_endpoint      = (known after apply)
+      + primary_dfs_internet_host          = (known after apply)
+      + primary_dfs_microsoft_endpoint     = (known after apply)
+      + primary_dfs_microsoft_host         = (known after apply)
+      + primary_file_endpoint              = (known after apply)
+      + primary_file_host                  = (known after apply)
+      + primary_file_internet_endpoint     = (known after apply)
+      + primary_file_internet_host         = (known after apply)
+      + primary_file_microsoft_endpoint    = (known after apply)
+      + primary_file_microsoft_host        = (known after apply)
+      + primary_location                   = (known after apply)
+      + primary_queue_endpoint             = (known after apply)
+      + primary_queue_host                 = (known after apply)
+      + primary_queue_microsoft_endpoint   = (known after apply)
+      + primary_queue_microsoft_host       = (known after apply)
+      + primary_table_endpoint             = (known after apply)
+      + primary_table_host                 = (known after apply)
+      + primary_table_microsoft_endpoint   = (known after apply)
+      + primary_table_microsoft_host       = (known after apply)
+      + primary_web_endpoint               = (known after apply)
+      + primary_web_host                   = (known after apply)
+      + primary_web_internet_endpoint      = (known after apply)
+      + primary_web_internet_host          = (known after apply)
+      + primary_web_microsoft_endpoint     = (known after apply)
+      + primary_web_microsoft_host         = (known after apply)
+      + public_network_access_enabled      = true
+      + queue_encryption_key_type          = "Service"
+      + resource_group_name                = "r"
+      + secondary_access_key               = (sensitive value)
+      + secondary_blob_connection_string   = (sensitive value)
+      + secondary_blob_endpoint            = (known after apply)
+      + secondary_blob_host                = (known after apply)
+      + secondary_blob_internet_endpoint   = (known after apply)
+      + secondary_blob_internet_host       = (known after apply)
+      + secondary_blob_microsoft_endpoint  = (known after apply)
+      + secondary_blob_microsoft_host      = (known after apply)
+      + secondary_connection_string        = (sensitive value)
+      + secondary_dfs_endpoint             = (known after apply)
+      + secondary_dfs_host                 = (known after apply)
+      + secondary_dfs_internet_endpoint    = (known after apply)
+      + secondary_dfs_internet_host        = (known after apply)
+      + secondary_dfs_microsoft_endpoint   = (known after apply)
+      + secondary_dfs_microsoft_host       = (known after apply)
+      + secondary_file_endpoint            = (known after apply)
+      + secondary_file_host                = (known after apply)
+      + secondary_file_internet_endpoint   = (known after apply)
+      + secondary_file_internet_host       = (known after apply)
+      + secondary_file_microsoft_endpoint  = (known after apply)
+      + secondary_file_microsoft_host      = (known after apply)
+      + secondary_location                 = (known after apply)
+      + secondary_queue_endpoint           = (known after apply)
+      + secondary_queue_host               = (known after apply)
+      + secondary_queue_microsoft_endpoint = (known after apply)
+      + secondary_queue_microsoft_host     = (known after apply)
+      + secondary_table_endpoint           = (known after apply)
+      + secondary_table_host               = (known after apply)
+      + secondary_table_microsoft_endpoint = (known after apply)
+      + secondary_table_microsoft_host     = (known after apply)
+      + secondary_web_endpoint             = (known after apply)
+      + secondary_web_host                 = (known after apply)
+      + secondary_web_internet_endpoint    = (known after apply)
+      + secondary_web_internet_host        = (known after apply)
+      + secondary_web_microsoft_endpoint   = (known after apply)
+      + secondary_web_microsoft_host       = (known after apply)
+      + sftp_enabled                       = false
+      + shared_access_key_enabled          = true
+      + table_encryption_key_type          = "Service"
+
+      + blob_properties (known after apply)
+
+      + network_rules (known after apply)
+
+      + queue_properties (known after apply)
+
+      + routing (known after apply)
+
+      + share_properties (known after apply)
+
+      + static_website (known after apply)
+    }
+
+  # azurerm_storage_container.data will be created
+  + resource "azurerm_storage_container" "" {
+      + container_access_type             = "container"
+      + default_encryption_scope          = (known after apply)
+      + encryption_scope_override_enabled = true
+      + has_immutability_policy           = (known after apply)
+      + has_legal_hold                    = (known after apply)
+      + id                                = (known after apply)
+      + metadata                          = (known after apply)
+      + name                              = ""
+      + resource_manager_id               = (known after apply)
+      + storage_account_name              = ""
+    }
+
+  # databricks_cluster.stream will be created
+  + resource "databricks_cluster" "stream" {
+      + autotermination_minutes      = 30
+      + cluster_id                   = (known after apply)
+      + cluster_name                 = "Azure_Spark_Streaming"
+      + custom_tags                  = {
+          + "ResourceClass" = "SingleNode"
+        }
+      + default_tags                 = (known after apply)
+      + driver_instance_pool_id      = (known after apply)
+      + driver_node_type_id          = (known after apply)
+      + enable_elastic_disk          = (known after apply)
+      + enable_local_disk_encryption = (known after apply)
+      + id                           = (known after apply)
+      + node_type_id                 = "Standard_E4d_v4"
+      + num_workers                  = 0
+      + spark_conf                   = {
+          + "spark.databricks.cluster.profile" = "singleNode"
+          + "spark.master"                     = "local[*]"
+        }
+      + spark_version                = "15.4.x-scala2.12"
+      + state                        = (known after apply)
+      + url                          = (known after apply)
+    }
+
+  # databricks_job.Task_1 will be created
+  + resource "databricks_job" "Task_1" {
+      + always_running      = false
+      + control_run_state   = false
+      + format              = (known after apply)
+      + id                  = (known after apply)
+      + max_concurrent_runs = 1
+      + name                = "Task_1"
+      + url                 = (known after apply)
+
+      + run_as (known after apply)
+
+      + task {
+          + existing_cluster_id = (known after apply)
+          + retry_on_timeout    = (known after apply)
+          + task_key            = "Task_1"
+
+          + notebook_task {
+              + notebook_path = "/cicd/Task_1"
+            }
+        }
+    }
+
+  # databricks_job.Task_2_a will be created
+  + resource "databricks_job" "Task_2_a" {
+      + always_running      = false
+      + control_run_state   = false
+      + format              = (known after apply)
+      + id                  = (known after apply)
+      + max_concurrent_runs = 1
+      + name                = "Task_2_a"
+      + url                 = (known after apply)
+
+      + run_as (known after apply)
+
+      + task {
+          + existing_cluster_id = (known after apply)
+          + retry_on_timeout    = (known after apply)
+          + task_key            = "Task_2_a"
+
+          + notebook_task {
+              + notebook_path = "/cicd/Task_2_a"
+            }
+        }
+    }
+
+  # databricks_job.Task_2_b will be created
+  + resource "databricks_job" "Task_2_b" {
+      + always_running      = false
+      + control_run_state   = false
+      + format              = (known after apply)
+      + id                  = (known after apply)
+      + max_concurrent_runs = 1
+      + name                = "Task_2_b"
+      + url                 = (known after apply)
+
+      + run_as (known after apply)
+
+      + task {
+          + existing_cluster_id = (known after apply)
+          + retry_on_timeout    = (known after apply)
+          + task_key            = "Task_2_b"
+
+          + notebook_task {
+              + notebook_path = "/cicd/Task_2_b"
+            }
+        }
+    }
+
+  # databricks_notebook.Task_1 will be created
+  + resource "databricks_notebook" "Task_1" {
+      + format         = (known after apply)
+      + id             = (known after apply)
+      + language       = (known after apply)
+      + md5            = "different"
+      + object_id      = (known after apply)
+      + object_type    = (known after apply)
+      + path           = "/cicd/Task_1"
+      + source         = "./Task_1.dbc"
+      + url            = (known after apply)
+      + workspace_path = (known after apply)
+    }
+
+  # databricks_notebook.Task_2_a will be created
+  + resource "databricks_notebook" "Task_2_a" {
+      + format         = (known after apply)
+      + id             = (known after apply)
+      + language       = (known after apply)
+      + md5            = "different"
+      + object_id      = (known after apply)
+      + object_type    = (known after apply)
+      + path           = "/cicd/Task_2_a"
+      + source         = "./Task_2_a.dbc"
+      + url            = (known after apply)
+      + workspace_path = (known after apply)
+    }
+
+  # databricks_notebook.Task_2_b will be created
+  + resource "databricks_notebook" "Task_2_b" {
+      + format         = (known after apply)
+      + id             = (known after apply)
+      + language       = (known after apply)
+      + md5            = "different"
+      + object_id      = (known after apply)
+      + object_type    = (known after apply)
+      + path           = "/cicd/Task_2_b"
+      + source         = "./Task_2_b.dbc"
+      + url            = (known after apply)
+      + workspace_path = (known after apply)
+    }
+
+Plan: 9 to add, 0 to change, 0 to destroy.
+
+Changes to Outputs:
+  + job_ids = {
+      + Task_1   = (known after apply)
+      + Task_2_a = (known after apply)
+      + Task_2_b = (known after apply)
+    }
+╷
+│ Warning: Argument is deprecated
+│
+│   with azurerm_storage_container.data,
+│   on main.tf line 66, in resource "azurerm_storage_container" "":
+│   66:   storage_account_name  = azurerm_storage_account.Azure_Spark_Streaming.name
+│
+│ the `storage_account_name` property has been deprecated in favour of `storage_account_id` and will be removed in version 5.0 of the Provider.
+╵
+
+Do you want to perform these actions?
+  Terraform will perform the actions described above.
+  Only 'yes' will be accepted to approve.
+
+  Enter a value: yes
+
+databricks_notebook.Task_1: Creating...
+databricks_notebook.Task_2_b: Creating...
+databricks_notebook.Task_2_a: Creating...
+databricks_cluster.stream: Creating...
+databricks_notebook.Task_1: Creation complete after 1s [id=/cicd/Task_1]
+databricks_notebook.Task_2_b: Creation complete after 1s [id=/cicd/Task_2_b]
+databricks_notebook.Task_2_a: Creation complete after 1s [id=/cicd/Task_2_a]
+azurerm_storage_account.Azure_Spark_Streaming: Creating...
+databricks_cluster.stream: Still creating... [10s elapsed]
+databricks_cluster.stream: Still creating... [20s elapsed]
+databricks_cluster.stream: Still creating... [30s elapsed]
+databricks_cluster.stream: Still creating... [40s elapsed]
+databricks_cluster.stream: Still creating... [50s elapsed]
+databricks_cluster.stream: Still creating... [1m0s elapsed]
+databricks_cluster.stream: Still creating... [1m10s elapsed]
+databricks_cluster.stream: Still creating... [1m20s elapsed]
+databricks_cluster.stream: Still creating... [1m30s elapsed]
+databricks_cluster.stream: Still creating... [1m40s elapsed]
+databricks_cluster.stream: Still creating... [1m50s elapsed]
+databricks_cluster.stream: Still creating... [2m0s elapsed]
+databricks_cluster.stream: Still creating... [2m10s elapsed]
+databricks_cluster.stream: Still creating... [2m20s elapsed]
+databricks_cluster.stream: Still creating... [2m30s elapsed]
+databricks_cluster.stream: Still creating... [2m40s elapsed]
+databricks_cluster.stream: Still creating... [2m50s elapsed]
+databricks_cluster.stream: Still creating... [3m0s elapsed]
+databricks_cluster.stream: Still creating... [3m10s elapsed]
+databricks_cluster.stream: Still creating... [3m20s elapsed]
+databricks_cluster.stream: Still creating... [3m30s elapsed]
+databricks_cluster.stream: Still creating... [3m40s elapsed]
+databricks_cluster.stream: Still creating... [3m50s elapsed]
+databricks_cluster.stream: Still creating... [4m0s elapsed]
+databricks_cluster.stream: Still creating... [4m10s elapsed]
+databricks_cluster.stream: Still creating... [4m20s elapsed]
+databricks_cluster.stream: Still creating... [4m30s elapsed]
+databricks_cluster.stream: Still creating... [4m40s elapsed]
+databricks_cluster.stream: Still creating... [4m50s elapsed]
+databricks_cluster.stream: Still creating... [5m0s elapsed]
+databricks_cluster.stream: Creation complete after 5m3s [id=0428-061818-5npivnq1]
+databricks_job.Task_1: Creating...
+databricks_job.Task_2_b: Creating...
+databricks_job.Task_2_a: Creating...
+databricks_job.Task_2_b: Creation complete after 1s [id=916817301917295]
+databricks_job.Task_1: Creation complete after 1s [id=973408353027284]
+databricks_job.Task_2_a: Creation complete after 1s [id=317276640645714]
+```
+
+After the successful terraform execution I checked the created notebooks and cluster:
+
+![cicd_cluster](https://github.com/user-attachments/assets/10777003-463a-4f38-bd6b-ba073fbcd331)
+
+![cicd_nbooks](https://github.com/user-attachments/assets/0a78dfbe-a0cc-446f-848a-3c1b2afaabb5)
+
+
+### Using Spark calculate in Databricks Notebooks for each city each day
+
+I initiated the job from CMD:
+
+```python
+c:\data_eng\házi\6>databricks jobs run-now --job-id 321424226379040
+WARN: Your CLI is configured to use Jobs API 2.0. In order to use the latest Jobs features please upgrade to 2.1: 'databricks jobs configure --version=2.1'. Future versions of this CLI will default to the new Jobs API. Learn more at https://docs.databricks.com/dev-tools/cli/jobs-cli.html
+{
+  "run_id": 1020340660154109,
+  "number_in_job": 1020340660154109
+}
+```
+
+![cicd_tas1_job](https://github.com/user-attachments/assets/8824872d-ed73-42a4-8b93-49681547bcf0)
+
+![cicd_task1_output](https://github.com/user-attachments/assets/6a8fccda-c051-4044-86af-a67c8dfc6f92)
+
+![cicd_dashb_1](https://github.com/user-attachments/assets/b1d9bb01-d3a9-4a8c-89ab-9a1c56cb33c9)
+
+
+Fraction of the data streaming scripts' output:
+
+```python
+Uploading data for: c:/data_eng/házi/6/m13sparkstreaming/hotel-weather/year=2017\month=09\day=30
+Uploading: hotel-weather/year=2017/month=09/day=30/part-00023-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=30/part-00026-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=30/part-00099-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=30/part-00123-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=30/part-00144-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=30/part-00148-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=30/part-00151-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=30/part-00156-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=30/part-00176-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Uploading: hotel-weather/year=2017/month=09/day=30/part-00184-e75efed7-c7e2-474d-9d80-f70b0ff83dfb.c000.snappy.parquet
+Finished uploading files for c:/data_eng/házi/6/m13sparkstreaming/hotel-weather/year=2017\month=09\day=30.
+
+All weather data successfully uploaded day by day!
+
+Process finished with exit code 0
+```
+
+After the first task I deleted all the logs from the container:
+
+![cicd_empty_cont](https://github.com/user-attachments/assets/06d29506-52f2-4b46-81ef-5aed4208d934)
+
+### Visualize incoming data in Databricks Notebook for 10 biggest cities (the biggest number of hotels in the city, one chart for one city)
+
+As I wrote earlier the second task was executed in two parts, but unfortunately, the Task_2_b is processed as a batch in a job quite quickly, I couldn't visualize the data in the job. The solution was to start the notebook and do the visualization manually.
+So while the Task_2_a notebook was executing the streaming I manually created the visualization for the 10 bigges cities.
+
+![cicid_task2s](https://github.com/user-attachments/assets/01c97fd6-8ab2-4a60-a4ef-a16f9bc6861f)
+
+
+I initiated the job of the Task_2_a from CMD:
+```python
+c:\data_eng\házi\6>databricks jobs run-now --job-id 317276640645714
+WARN: Your CLI is configured to use Jobs API 2.0. In order to use the latest Jobs features please upgrade to 2.1: 'databricks jobs configure --version=2.1'. Future versions of this CLI will default to the new Jobs API. Learn more at https://docs.databricks.com/dev-tools/cli/jobs-cli.html
+{
+  "run_id": 840361529742952,
+  "number_in_job": 840361529742952
+}
+```
+
+The dashboard of the Task_2_a notebook:
+
+![cicd_task2_dashb](https://github.com/user-attachments/assets/cd64aa57-fb2c-4827-864b-289e5ef862b9)
+
+I initiated the job of the Task_2_b from CMD:
+
+```python
+c:\data_eng\házi\6>databricks jobs run-now --job-id 916817301917295
+WARN: Your CLI is configured to use Jobs API 2.0. In order to use the latest Jobs features please upgrade to 2.1: 'databricks jobs configure --version=2.1'. Future versions of this CLI will default to the new Jobs API. Learn more at https://docs.databricks.com/dev-tools/cli/jobs-cli.html
+{
+  "run_id": 316012330974125,
+  "number_in_job": 316012330974125
+}
+
+```
+Here you can see the list of the 10 biggest cities, then the tables of them and the related visualizations:
+
+![cicd_table_par](https://github.com/user-attachments/assets/d6f8ec9e-13d0-4cba-bb92-e4ac7ee43a10)
+
+### Paris:
+
+![cicd_tab_par](https://github.com/user-attachments/assets/31d39f9d-0930-4d6a-8bca-7ef25058f53c)
+
+### London:
+
+![cicd_tab_lon](https://github.com/user-attachments/assets/ef3e594e-db03-4272-b536-33f2601cb628)
+
+![cicd_vis_lon](https://github.com/user-attachments/assets/c05ed102-af37-4029-8e8a-a53f925df688)
+
+### Milan:
+
+![cicd_tab_mil](https://github.com/user-attachments/assets/87a1a313-4091-4f1d-aa3f-2b1cb25e9b05)
+
+![cicd_vis_mil](https://github.com/user-attachments/assets/c9a2d59c-f44e-4611-8267-34bb96a28594)
+
+### Amsterdam:
+
+![cicd_tab_ams](https://github.com/user-attachments/assets/c102990a-bb27-4f66-88d7-f7ca09f3bf73)
+
+![cicd_vis_ams](https://github.com/user-attachments/assets/e08e3a14-dafc-4d50-899b-64d3e55ee85c)
+
+### Paddington:
+
+![cicd_tab_padd](https://github.com/user-attachments/assets/2be2615f-93b6-4c79-99ea-e7536f1d8a10)
+
+![cicd_vis_padd](https://github.com/user-attachments/assets/93909e11-17ba-4ec7-8f15-df3f902d00a9)
+
+### Springfield
+
+![cicd_tab_spr](https://github.com/user-attachments/assets/4cbe4543-2cd2-4ddc-a658-a2dd7e9d99f2)
+
+![cicd_vis_spf](https://github.com/user-attachments/assets/130ea1c4-d62d-4c97-afbb-5874b206b47f)
+
+### Memphis:
+
+![cicd_tab_mem](https://github.com/user-attachments/assets/70ff98cb-9191-4db9-8ab7-4c50f7dc3a35)
+
+![cicd_vis_mem](https://github.com/user-attachments/assets/13c93adf-5bb4-4706-b2e3-71adb0485ac0)
+
+### Alberquerque
+
+![cicd_tab_alb](https://github.com/user-attachments/assets/87ebb254-b823-4b30-ad18-3bf372c62d1f)
+
+![cicid_vis_alb](https://github.com/user-attachments/assets/22aa80a9-daae-43b9-b7fd-4b1e8ef94583)
+
+### Elko:
+
+![cicd_tab_elk](https://github.com/user-attachments/assets/77249281-c45f-43de-95bf-20e44c5da468)
+
+![cicd_vis_elk](https://github.com/user-attachments/assets/e2018bcc-4fcd-498f-8225-f4baccc925ef)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
